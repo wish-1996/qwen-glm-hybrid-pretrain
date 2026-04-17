@@ -9,7 +9,7 @@ import math
 class MROPE(nn.Module):
     """
     简化可用版 M-RoPE（对齐 Qwen3.5 的 mrope_section 思路）
-    - head_dim=128 时：half_dim=64，mrope_section=[11,11,10] 的和=32，对应 64 维（每个“旋转对”2维）
+    - head_dim=128 时：half_dim=64，mrope_section=[11,11,10] 的和=32，对应 64 维（每个"旋转对"2维）
     """
     def __init__(self, head_dim: int, mrope_section=None, theta=10000.0):
         super().__init__()
@@ -630,7 +630,7 @@ class VisionEncoder(nn.Module):
         
         return x
 
-class Qwen35Model(nn.Module):
+class HybridMMMoEModel(nn.Module):
     def __init__(self, config, use_multimodal=False):
         super().__init__()
         self.config = config
@@ -902,7 +902,7 @@ def create_mtp_model(config: Qwen35Config, mtp_k: int = 3) -> MTPModel:
     Returns:
         MTPModel 实例
     """
-    backbone = Qwen35Model(config, use_multimodal=False)
+    backbone = HybridMMMoEModel(config, use_multimodal=False)
     model = MTPModel(
         backbone=backbone,
         hidden_size=config.hidden_size,
@@ -910,3 +910,11 @@ def create_mtp_model(config: Qwen35Config, mtp_k: int = 3) -> MTPModel:
         mtp_k=mtp_k
     )
     return model
+
+# -------------------------
+# Backward compatibility
+# -------------------------
+# 保留历史类名，避免旧代码/旧checkpoint加载路径立刻失效
+Qwen35Model = HybridMMMoEModel
+
+__all__ = ["HybridMMMoEModel", "Qwen35Model"]

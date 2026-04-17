@@ -33,7 +33,7 @@ bash scripts/smoke_1node_1gpu.sh
 │   └── multimodal_data_loader.py
 ├── model/                     # 模型实现
 │   ├── hybrid_model.py         # 推荐：项目级模型入口（不绑定 qwen35 命名）
-│   └── qwen35_tiny_model.py    # 历史实现（后续可逐步重构）
+│   └── hybrid_moe_model.py     # 主干可运行实现（后续可逐步拆分重构）
 ├── train/
 │   ├── pretrain.py             # 推荐：统一训练入口
 │   └── train_multimodal.py     # 训练脚本（当前主要实现）

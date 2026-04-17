@@ -1,4 +1,4 @@
-# 06 数据管线：格式、混合采样、packing 与 mask
+# 05 数据管线：格式、混合采样、packing 与 mask
 
 ## 数据格式
 
@@ -42,6 +42,91 @@
 - **优化**：
   - 工作线程种子设置
   - 内存固定以加速数据传输
+
+## 真实数据逐步举例（从 CSV 到 batch）
+
+下面用仓库内的**真实样本**走一遍“CSV -> Dataset.__getitem__ -> DataLoader batch”的变换逻辑。
+
+### Step 0：找到一条“本地有缓存图片”的 CSV 行
+
+CSV: `data/68a5eee7-fde2-4787-8900-169b46fbcd93.csv`  
+本地图片缓存目录: `data/image_cache/`
+
+我们在 CSV 中向后扫描，找到第一条其 `url` basename 在 `image_cache/` 中存在的样本：
+
+```json
+{
+  "csv_url": "https://modelscope.cn-beijing.oss.aliyuncs.com/open_data/sa-1b-cot-qwen/sa_151135.jpg",
+  "local_image_path": "data/image_cache/sa_151135.jpg",
+  "text_column_used": "cap_seg",
+  "text_char_len": 288
+}
+```
+
+### Step 1：图片 -> pixel_values
+
+`_safe_open_image()` 会做：
+1) `PIL.Image.open(path).convert('RGB')`
+2) `resize((image_size, image_size))`（当前默认 `image_size=224`）
+3) 转为 float32，并归一化到 `[0,1]`
+4) 转为 CHW 排布：`[3,H,W]`
+
+真实样本的统计（来自 `tools/dump_real_sample_trace.py`）：
+
+```json
+{
+  "orig_size_wh": [1500, 2247],
+  "after_resize_chw": [3, 224, 224],
+  "dtype": "float32",
+  "min": 0.0,
+  "max": 1.0,
+  "mean": 0.3097212612628937,
+  "example_rgb_at_0_0": [0.0039215689, 0.2509804070, 0.4509803951]
+}
+```
+
+因此 `Dataset.__getitem__` 返回的单样本里：
+- `pixel_values.shape == [3,224,224]`（无 batch 维）
+- 进入 DataLoader 之后会被 stack 成 `pixel_values.shape == [B,3,224,224]`
+
+### Step 2：文本 -> input_ids / attention_mask（padding 到 max_length）
+
+当前数据集对文本的 tokenization 是：
+- `max_length = 512`
+- `padding="max_length"`（不够补齐到 512）
+- `truncation=True`（超过则截断）
+
+真实样本的 tokenization 结果（同样来自 `tools/dump_real_sample_trace.py`）：
+
+```json
+{
+  "input_ids_shape": [512],
+  "attention_mask_shape": [512],
+  "num_text_tokens_before_pad": 175,
+  "num_text_tokens_after_trunc": 175,
+  "pad_id": 151643,
+  "input_ids_head_24": [13608, 9752, 61705, 1210, 364, 43288, 99639, 86341, 101987, 100169, 104123, 99893, 104040, 9370, 99893, 65278, 61443, 102184, 1773, 108900, 9370, 17447, 99371, 99659]
+}
+```
+
+因此：
+- `input_ids.shape == [512]`
+- `attention_mask.shape == [512]`
+- `attention_mask.sum() == 175`（剩余 337 个位置是 padding）
+
+### Step 3：DataLoader batch 后的结构
+
+最终一个 batch（batch_size=B）会是：
+
+```python
+batch = {
+  "input_ids":      LongTensor[B, 512],
+  "attention_mask": LongTensor[B, 512],
+  "pixel_values":   FloatTensor[B, 3, 224, 224],
+}
+```
+
+> 下一步（Step 1 对齐）：模型内部会把 image tokens 与 text tokens 拼接，因此需要把 labels/attention_mask 扩展到 `T_total=T_img+T_text`，详见 `docs/05_multimodal_sequence_alignment.md`。
 
 ## 数据混合采样
 

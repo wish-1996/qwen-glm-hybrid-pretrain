@@ -65,6 +65,10 @@ def build_aligned_masks_and_labels(
     
     # 创建文本部分的 labels（使用 input_ids，因为我们要预测下一个 token）
     labels_text = input_ids.clone()
+    # 关键：文本 padding 位置不应该参与 loss
+    # - attention_mask == 0 的位置是 padding token
+    # - labels 设为 -100（ignore_index）即可在 CrossEntropyLoss 中被忽略
+    labels_text = labels_text.masked_fill(attention_mask == 0, pad_ignore_index)
     
     # 拼接注意力掩码
     attention_mask_total = torch.cat([attention_mask_img, attention_mask], dim=1)

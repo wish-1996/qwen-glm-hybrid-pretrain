@@ -20,6 +20,7 @@ from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 from model.hybrid_model import HybridMMMoEModel
 from configs.model_config import ModelConfig
 from data.multimodal_data_loader import get_data_loader
+from data.multimodal_sequence_alignment import build_aligned_masks_and_labels
 
 
 def train(args):
@@ -113,23 +114,33 @@ def train(args):
             t = torch.arange(T, device=device).unsqueeze(0).expand(B, -1)
             text_positions = torch.stack([t, torch.zeros_like(t), torch.zeros_like(t)], dim=-1)  # [B, T, 3]
             
-            # 构造 labels（mask padding）
-            labels = input_ids.clone()
-            labels[attention_mask == 0] = -100
+            # Step 1：多模态序列对齐（关键）
+            # 模型内部会把 image_embeds 与 text_embeds concat，因此模型输出 logits 的长度是：
+            #   T_total = T_img + T_text
+            # 这里必须把 labels/attention_mask 也扩成同样长度，并且 image 部分 labels 全 -100
+            aligned = build_aligned_masks_and_labels(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                image_size=config.image_size,
+                patch_size=config.patch_size,
+                pad_ignore_index=-100,
+            )
+            attention_mask_total = aligned.attention_mask_total
+            labels_total = aligned.labels_total
             
             # 前向传播
             logits, past_states, aux_loss = model(
                 input_ids=input_ids,
                 positions=text_positions,
                 pixel_values=pixel_values,
-                attention_mask=attention_mask,
+                attention_mask=attention_mask_total,
                 use_cache=False,
                 output_hidden_states=False
             )
             
             # 计算主任务损失
             shift_logits = logits[:, :-1, :].contiguous()
-            shift_labels = labels[:, 1:].contiguous()
+            shift_labels = labels_total[:, 1:].contiguous()
             
             loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
             main_loss = loss_fct(

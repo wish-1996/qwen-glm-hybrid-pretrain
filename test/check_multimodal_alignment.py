@@ -13,6 +13,11 @@ Step 1 对齐检查脚本（可单独运行）
     --max_length 32
 """
 
+import sys
+import os
+# 添加项目根目录到 Python 路径
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import argparse
 
 import torch

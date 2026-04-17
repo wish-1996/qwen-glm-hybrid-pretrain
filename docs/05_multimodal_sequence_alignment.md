@@ -10,11 +10,13 @@
 - **图像序列长度**：`T_img`，由图像补丁数量决定，计算公式为 `(image_size // patch_size)²`
 - **总序列长度**：`T_total = T_img + T_text`，模型输出的 logits 长度
 
-### 对齐目标
+### 对齐目标（更像生产：显式图片占位符）
 
-1. **注意力掩码对齐**：确保图像部分的注意力掩码为 1（有效），文本部分保持原掩码
-2. **标签对齐**：确保图像部分的标签为 -100（忽略），文本部分保持原标签
-3. **位置编码对齐**：为图像和文本部分创建相应的位置编码
+1. **input_ids 对齐（新增）**：显式在 token 序列中插入图片占位符（如 `<|image_pad|>`），占用 `T_img` 个位置  
+   - `input_ids_total = [<|image_pad|> * T_img] + [text tokens]`
+2. **注意力掩码对齐**：确保图像部分的注意力掩码为 1（有效），文本部分保持原掩码
+3. **标签对齐**：确保图像部分的标签为 -100（忽略），文本部分保持原标签（padding 位置也必须是 -100）
+4. **位置编码对齐**：为图像和文本部分创建相应的位置编码
 
 ## 实现方案
 
@@ -101,6 +103,85 @@ logits, past_states, aux_loss = model(
 shift_logits = logits[:, :-1, :].contiguous()
 shift_labels = labels_total[:, 1:].contiguous()
 ```
+
+## 真实数据逐步举例（一步步对齐到模型 forward 所需的 T_total）
+
+这里用 `docs/05_data_pipeline.md` 中同一条真实样本继续往下走，展示：
+`(input_ids, attention_mask, pixel_values)` 如何变成模型 forward 需要的
+`attention_mask_total / labels_total`（长度变为 `T_total=T_img+T_text`）。
+
+### Step 0：这条真实样本的“已知事实”
+
+来自 `tools/dump_real_sample_trace.py` 的真实输出（节选）：
+
+```json
+{
+  "image_size": 224,
+  "patch_size": 16,
+  "T_img": 196,
+  "T_text": 512,
+  "T_total": 708,
+  "num_text_tokens_after_trunc": 175,
+  "pad_tokens": 337
+}
+```
+
+解释：
+- `T_img=(224//16)^2=14*14=196`（图像 patch tokens 数）
+- `T_text=512`（文本被 padding 到 max_length）
+- 这条样本真实文本 token 数是 `175`，所以 padding token 数是 `512-175=337`
+
+### Step 1：attention_mask_total 怎么拼出来？
+
+规则：
+- 图像部分：全 1（`[B,T_img]`）
+- 文本部分：沿用 DataLoader 给你的 `attention_mask`（`[B,T_text]`）
+- 拼接：`attention_mask_total = cat([img_ones, attention_mask_text], dim=1)`
+
+对这条样本（B=1）来说，`attention_mask_total` 的结构就是：
+
+```text
+len = 708
+[0 : 196)         -> 1（图像 patch tokens）
+[196 : 196+175)   -> 1（真实文本 tokens）
+[196+175 : 708)   -> 0（文本 padding tokens）
+```
+
+### Step 2：labels_total 怎么拼出来？
+
+规则（Step1 的关键点）：
+- 图像部分：全 `-100`（不计算 loss）
+- 文本部分：用 `input_ids`，但 **padding 位置也必须置为 -100**（不计算 loss）
+- 拼接：`labels_total = cat([labels_img, labels_text], dim=1)`
+
+对这条样本（B=1）来说：
+
+```text
+len = 708
+[0 : 196)         -> -100（图像 patch tokens）
+[196 : 196+175)   -> input_ids（真实文本 tokens）
+[196+175 : 708)   -> -100（文本 padding tokens）
+```
+
+举一个“头部片段”的真实例子（同一条样本的 `input_ids_head_24`）：
+
+```text
+labels_total[0:10]          = [-100, -100, ...]  # 图像区
+labels_total[196:196+10]    = [13608, 9752, 61705, 1210, 364, 43288, 99639, 86341, 101987, 100169]
+labels_total[196+175:196+185] = [-100, -100, ...]  # 文本 padding 区
+```
+
+### Step 3：loss 的 shift 为什么不会“污染”图像区？
+
+训练里一般是：
+```python
+shift_logits = logits[:, :-1, :]
+shift_labels = labels_total[:, 1:]
+loss = CE(shift_logits, shift_labels, ignore_index=-100)
+```
+
+因为图像区的 labels 是 `-100`，shift 之后依然是 `-100`，因此图像 token 对 loss **完全不产生贡献**；
+同理，文本 padding 区也因为 labels=-100 而被忽略。
 
 ## 注意事项
 

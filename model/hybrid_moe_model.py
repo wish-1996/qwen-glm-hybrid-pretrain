@@ -550,41 +550,90 @@ class HybridMMMoEModel(nn.Module):
             # 多模态融合层
             self.multimodal_fusion = nn.Linear(config.hidden_size * 2, config.hidden_size)
 
-    def forward(self, input_ids=None, positions=None, pixel_values=None,
-               attention_mask=None, use_cache=False, output_hidden_states=False):
-        # 处理文本输入
-        if input_ids is not None:
-            text_embeds = self.embed(input_ids)  # text_embeds: [B, T_text, hidden_size]
-        else:
-            text_embeds = None
+    def forward(
+        self,
+        input_ids=None,
+        positions=None,
+        pixel_values=None,
+        attention_mask=None,
+        use_cache=False,
+        output_hidden_states=False,
+        *,
+        image_pad_token_id: int | None = None,
+    ):
+        """
+        多模态 forward（更像生产的写法）：
 
-        # 处理图像输入
+        支持两种输入格式：
+
+        A) 旧格式（“旁路 pixel_values + concat embeddings”）
+           - input_ids: [B, T_text]
+           - pixel_values: [B, 3, H, W]
+           - 模型内部把 image_embeds 与 text_embeds 直接 concat
+
+        B) 新格式（“token 序列里显式占位 <image_pad>”）
+           - input_ids: [B, T_total]，其中前 T_img 个位置是 image_pad_token_id
+           - pixel_values: [B, 3, H, W]
+           - 模型内部用 image_embeds 替换这段占位符 embedding
+           - 好处：token 序列上可见图片位置，更容易对齐指令数据/packing/多图等生产需求
+        """
+
+        # 1) token embeddings（如果有 input_ids）
+        if input_ids is not None:
+            x = self.embed(input_ids)  # [B, T, H]
+        else:
+            x = None
+
+        # 2) image embeddings（如果开启多模态）
         if self.use_multimodal and pixel_values is not None:
-            image_embeds = self.vision_encoder(pixel_values)  # image_embeds: [B, T_image, hidden_size]
+            image_embeds = self.vision_encoder(pixel_values)  # [B, T_img, H]
         else:
             image_embeds = None
 
-        # 融合文本和图像特征
-        if text_embeds is not None and image_embeds is not None:
-            # 拼接图像和文本特征: [B, T_image + T_text, hidden_size]
-            x = torch.cat([image_embeds, text_embeds], dim=1)
+        # 3) 融合
+        if x is not None and image_embeds is not None:
+            T_img = image_embeds.size(1)
+
+            # --- 新格式：input_ids 里已有 image 占位符，直接替换 prefix 的 embedding ---
+            if image_pad_token_id is not None and x.size(1) >= T_img:
+                # 强校验：前 T_img 个 token 必须都是 image_pad_token_id，否则很可能是误用
+                if not torch.all(input_ids[:, :T_img] == int(image_pad_token_id)):
+                    raise ValueError(
+                        "Multimodal expects input_ids prefix to be image_pad_token_id when image_pad_token_id is provided. "
+                        f"got mismatch in first {T_img} tokens."
+                    )
+                x[:, :T_img, :] = image_embeds
+
+            # --- 旧格式：input_ids 只有文本，走 concat ---
+            else:
+                x = torch.cat([image_embeds, x], dim=1)  # [B, T_img + T_text, H]
+
+            # positions 对齐：
+            # - 如果调用方传的是 text_positions（长度=T_text），这里补上 image_positions；
+            # - 如果调用方已经传了 total positions（长度=T_total），这里不再重复拼接。
             if positions is not None:
-                batch_size = x.size(0)
-                image_seq_len = image_embeds.size(1)  # T_image
-                # 创建图像位置编码: [B, T_image, 3]，3维对应 [t, h, w]
-                image_positions = torch.zeros(batch_size, image_seq_len, 3, device=positions.device)
-                for i in range(batch_size):
+                if positions.size(1) == x.size(1):
+                    # 已经是 total positions，直接用
+                    pass
+                else:
+                    # 认为传的是 text_positions：需要拼上 image_positions
+                    batch_size = x.size(0)
+                    grid = self.config.image_size // self.config.patch_size  # e.g. 14
+                    image_positions = torch.zeros(batch_size, T_img, 3, device=positions.device, dtype=positions.dtype)
                     idx = 0
-                    for h in range(14):  # 14x14 补丁网格
-                        for w in range(14):
-                            # 为每个图像补丁分配 [0, h, w] 位置编码
-                            image_positions[i, idx] = torch.tensor([0, h, w], device=positions.device)
+                    for h in range(grid):
+                        for w in range(grid):
+                            image_positions[:, idx, 0] = 0
+                            image_positions[:, idx, 1] = h
+                            image_positions[:, idx, 2] = w
                             idx += 1
-                # 拼接图像和文本的位置编码: [B, T_image + T_text, 3]
-                positions = torch.cat([image_positions, positions], dim=1)
-        elif text_embeds is not None:
-            x = text_embeds
+                    positions = torch.cat([image_positions, positions], dim=1)
+
+        elif x is not None:
+            # 纯文本
+            pass
         elif image_embeds is not None:
+            # 纯图像（暂不作为主路径）
             x = image_embeds
         else:
             raise ValueError("Either input_ids or pixel_values must be provided")

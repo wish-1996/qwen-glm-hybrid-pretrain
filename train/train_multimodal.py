@@ -124,18 +124,25 @@ def train(args):
                 image_size=config.image_size,
                 patch_size=config.patch_size,
                 pad_ignore_index=-100,
+                image_pad_token_id=getattr(config, "image_pad_token_id", None),
+                build_positions=True,
             )
+            input_ids_total = aligned.input_ids_total
             attention_mask_total = aligned.attention_mask_total
             labels_total = aligned.labels_total
+            positions_total = aligned.positions_total
             
             # 前向传播
             logits, past_states, aux_loss = model(
-                input_ids=input_ids,
-                positions=text_positions,
+                input_ids=input_ids_total,
+                positions=positions_total if positions_total is not None else text_positions,
                 pixel_values=pixel_values,
                 attention_mask=attention_mask_total,
                 use_cache=False,
-                output_hidden_states=False
+                output_hidden_states=False,
+                # 让模型知道：input_ids_total 的前 T_img 个位置是 <|image_pad|> 占位符
+                # （模型会用 image_embeds 替换这段占位符 embedding）
+                image_pad_token_id=getattr(config, "image_pad_token_id", None),
             )
             
             # 计算主任务损失

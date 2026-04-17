@@ -61,11 +61,14 @@ def build_aligned_masks_and_labels(
     Returns:
         AlignedOutput: 包含对齐后的 attention_mask_total 和 labels_total
     """
+    # 获取输入形状：B 是批次大小，T_text 是文本序列长度
+    # 示例：input_ids.shape = (2, 32) → B=2, T_text=32
     B, T_text = input_ids.shape
     
-    # 计算图像补丁数量
+    # 计算图像补丁数量：(image_size / patch_size) 的平方
+    # 示例：image_size=224, patch_size=16 → (224//16)^2 = 14^2 = 196
     num_patches = (image_size // patch_size) ** 2
-    T_img = num_patches
+    T_img = num_patches  # T_img 是图像补丁的数量，例如 224/16=14 → 14*14=196
 
     # ----------------------------
     # (可选) 把“图片占位符 tokens”拼进 input_ids
@@ -81,33 +84,36 @@ def build_aligned_masks_and_labels(
     if image_pad_token_id is None:
         # 保持兼容：不提供 image_pad_token_id 时，仍然返回原始 input_ids（仅用于老流程/对比）
         input_ids_img = None
-        input_ids_total = input_ids
+        input_ids_total = input_ids  # 形状保持 [B, T_text]，示例：(2, 32)
     else:
+        # 创建图像占位符 tokens：形状 [B, T_img]，示例：(2, 196)
         input_ids_img = torch.full(
             (B, T_img),
             int(image_pad_token_id),
             dtype=input_ids.dtype,
             device=input_ids.device,
         )
+        # 拼接图像占位符和文本 tokens：形状 [B, T_img + T_text]，示例：(2, 196+32=228)
         input_ids_total = torch.cat([input_ids_img, input_ids], dim=1)
     
-    # 创建图像部分的注意力掩码（全 1，因为图像补丁都是有效的）
+    # 创建图像部分的注意力掩码（全 1，因为图像补丁都是有效的）：形状 [B, T_img]，示例：(2, 196)
     attention_mask_img = torch.ones(B, T_img, dtype=attention_mask.dtype, device=attention_mask.device)
     
-    # 创建图像部分的 labels（全 -100，因为图像部分不需要计算损失）
+    # 创建图像部分的 labels（全 -100，因为图像部分不需要计算损失）：形状 [B, T_img]，示例：(2, 196)
     labels_img = torch.full((B, T_img), pad_ignore_index, dtype=input_ids.dtype, device=input_ids.device)
     
-    # 创建文本部分的 labels（使用 input_ids，因为我们要预测下一个 token）
+    # 创建文本部分的 labels（使用 input_ids，因为我们要预测下一个 token）：形状 [B, T_text]，示例：(2, 32)
     labels_text = input_ids.clone()
     # 关键：文本 padding 位置不应该参与 loss
     # - attention_mask == 0 的位置是 padding token
     # - labels 设为 -100（ignore_index）即可在 CrossEntropyLoss 中被忽略
+    # 示例：labels_text[attention_mask == 0] = -100
     labels_text = labels_text.masked_fill(attention_mask == 0, pad_ignore_index)
     
-    # 拼接注意力掩码
+    # 拼接注意力掩码：形状 [B, T_img + T_text]，示例：(2, 228)
     attention_mask_total = torch.cat([attention_mask_img, attention_mask], dim=1)
     
-    # 拼接 labels
+    # 拼接 labels：形状 [B, T_img + T_text]，示例：(2, 228)
     labels_total = torch.cat([labels_img, labels_text], dim=1)
 
     positions_total = None
@@ -118,18 +124,24 @@ def build_aligned_masks_and_labels(
         #
         # 注意：这里我们默认图片放在序列开头，因此 positions_total 也是 image 在前、text 在后。
         grid = image_size // patch_size  # 例如 224//16=14
+        # 创建图像位置编码：形状 [B, T_img, 3]，示例：(2, 196, 3)
         image_positions = torch.zeros(B, T_img, 3, dtype=torch.long, device=input_ids.device)
         # 为每个 patch 分配 (0,h,w)
+        # 示例：对于 14x14 的网格，第一个 patch 是 (0,0,0)，第二个是 (0,0,1)，...，最后一个是 (0,13,13)
         idx = 0
         for h in range(grid):
             for w in range(grid):
-                image_positions[:, idx, 0] = 0
-                image_positions[:, idx, 1] = h
-                image_positions[:, idx, 2] = w
+                image_positions[:, idx, 0] = 0  # 时间维度为 0
+                image_positions[:, idx, 1] = h   # 高度维度
+                image_positions[:, idx, 2] = w   # 宽度维度
                 idx += 1
 
+        # 创建文本位置编码：形状 [B, T_text, 3]，示例：(2, 32, 3)
+        # 示例：t = [[0,1,2,...,31], [0,1,2,...,31]]
         t = torch.arange(T_text, device=input_ids.device, dtype=torch.long).unsqueeze(0).expand(B, -1)
+        # 示例：text_positions[0,0] = [0,0,0], text_positions[0,1] = [1,0,0], ...
         text_positions = torch.stack([t, torch.zeros_like(t), torch.zeros_like(t)], dim=-1)  # [B,T_text,3]
+        # 拼接图像和文本位置编码：形状 [B, T_img + T_text, 3]，示例：(2, 228, 3)
         positions_total = torch.cat([image_positions, text_positions], dim=1)
     
     return AlignedOutput(

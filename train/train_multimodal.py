@@ -21,6 +21,7 @@ from model.hybrid_model import HybridMMMoEModel
 from configs.model_config import ModelConfig
 from data.multimodal_data_loader import get_data_loader
 from data.multimodal_sequence_alignment import build_aligned_masks_and_labels
+from model.mtp import mtp_loss_from_hidden
 
 
 def train(args):
@@ -132,18 +133,29 @@ def train(args):
             labels_total = aligned.labels_total
             positions_total = aligned.positions_total
             
+            # -------------------------
             # 前向传播
-            logits, past_states, aux_loss = model(
+            # -------------------------
+            # 启用 MTP 时我们需要 hidden_states（用于计算 shift=2..K 的 logits_step）
+            need_hidden = bool(args.enable_mtp)
+
+            out = model(
                 input_ids=input_ids_total,
                 positions=positions_total if positions_total is not None else text_positions,
                 pixel_values=pixel_values,
                 attention_mask=attention_mask_total,
                 use_cache=False,
-                output_hidden_states=False,
+                output_hidden_states=need_hidden,
                 # 让模型知道：input_ids_total 的前 T_img 个位置是 <|image_pad|> 占位符
                 # （模型会用 image_embeds 替换这段占位符 embedding）
                 image_pad_token_id=getattr(config, "image_pad_token_id", None),
             )
+
+            if need_hidden:
+                logits, hidden_states, past_states, aux_loss = out
+            else:
+                logits, past_states, aux_loss = out
+                hidden_states = None
             
             # 计算主任务损失
             shift_logits = logits[:, :-1, :].contiguous()
@@ -155,9 +167,26 @@ def train(args):
                 shift_labels.view(-1)
             )
             
-            # 计算总损失，添加辅助损失
+            # 计算总损失：main loss + （可选）MTP loss + aux loss
             aux_loss_weight = 0.01
-            loss = main_loss + aux_loss_weight * aux_loss
+            loss = main_loss
+
+            # -------------------------
+            # MTP loss（shift=2..K），默认关闭
+            # -------------------------
+            if args.enable_mtp:
+                base_model = model.module if hasattr(model, "module") else model
+                mtp_out = mtp_loss_from_hidden(
+                    hidden_states=hidden_states,          # [B, T_total, H]
+                    labels=labels_total,                  # [B, T_total]
+                    lm_head=base_model.lm_head,           # 共享 head：复用 lm_head 权重
+                    mtp_k=args.mtp_k,
+                    ignore_index=-100,
+                )
+                loss = loss + float(args.mtp_weight) * mtp_out.loss_mtp
+
+            # MoE aux loss（负载均衡）
+            loss = loss + aux_loss_weight * aux_loss
             
             # 反向传播
             optimizer.zero_grad()
@@ -226,6 +255,14 @@ def main():
     
     # 分布式训练
     parser.add_argument('--distributed', action='store_true', help='Use distributed training')
+
+    # -------------------------
+    # MTP（Multi-Token Prediction）
+    # -------------------------
+    # 默认关闭，避免影响主训练链路；需要时手动打开
+    parser.add_argument('--enable_mtp', action='store_true', help='Enable MTP (multi-token prediction) loss')
+    parser.add_argument('--mtp_k', type=int, default=3, help='MTP prediction steps K (predict t+2..t+K)')
+    parser.add_argument('--mtp_weight', type=float, default=0.3, help='Weight for MTP loss term')
 
     # DataLoader 参数（生产级最常用的几个）
     parser.add_argument('--num_workers', type=int, default=4, help='DataLoader workers')

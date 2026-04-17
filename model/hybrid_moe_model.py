@@ -100,40 +100,54 @@ class GatedDeltaNet(nn.Module):
         self.mrope = MROPE(self.head_dim)
 
     def forward(self, x, positions, past_state=None, use_cache=False):
+        # x: 输入 hidden states，形状 [B, N, H]，示例：[2, 228, 2048]
+        # B=批次大小, N=序列长度, H=hidden_size
         B, N, _ = x.shape
         
-        # 1. 投影
+        # 1. 投影：将 hidden_size 投影到 Q/K/V 维度
+        # Q: [B, N, H] -> [B, N, num_heads*head_dim] -> [B, N, num_heads, head_dim] -> [B, num_heads, N, head_dim]
+        # 示例：q_proj: [2, 228, 2048] -> [2, 228, 16*128=2048] -> [2, 16, 228, 128]
         q = self.q_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(B, N, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(B, N, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        g = torch.sigmoid(self.gate_proj(x)).view(B, N, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(B, N, self.num_kv_heads, self.head_dim).transpose(1, 2)  # [B, num_kv_heads, N, head_dim]
+        v = self.v_proj(x).view(B, N, self.num_kv_heads, self.head_dim).transpose(1, 2)  # [B, num_kv_heads, N, head_dim]
+        g = torch.sigmoid(self.gate_proj(x)).view(B, N, self.num_kv_heads, self.head_dim).transpose(1, 2)  # [B, num_kv_heads, N, head_dim]，门控值
         
-        # 2. 应用 M-RoPE
+        # 2. 应用 M-RoPE：使用 3D 位置编码旋转 Q/K
+        # positions: [B, T, 3] -> [t, h, w]
+        # 输出形状不变：q, k 仍然是 [B, num_heads, N, head_dim] 和 [B, num_kv_heads, N, head_dim]
         q, k = self.mrope(q, k, positions)
         
         # 3. 归一化 (稳定训练关键)
-        q = F.normalize(q, p=2, dim=-1)
+        q = F.normalize(q, p=2, dim=-1)  # L2 归一化
         k = F.normalize(k, p=2, dim=-1)
         
         # 4. Gated Delta Update (推理模式：递归)
+        # use_cache=True 且 N==1 时启用增量推理
         if use_cache and N == 1:
+            # 初始化或获取 KV state
+            # state 形状：(B, num_kv_heads, head_dim, head_dim)
+            # 示例：(2, 4, 128, 128)，4 个 KV 头，每个 128x128
             if past_state is None:
-                # State shape: (B, KV_Heads, Head_Dim, Head_Dim)
                 state = torch.zeros(B, self.num_kv_heads, self.head_dim, self.head_dim, device=x.device)
             else:
                 state = past_state
             
             # Delta 更新: S = S + g * (k^T @ v)
+            # k^T: [B, num_kv_heads, head_dim, 1]
+            # v: [B, num_kv_heads, 1, head_dim]
+            # kv_outer: [B, num_kv_heads, head_dim, head_dim]
             kv_outer = torch.matmul(k.transpose(-2, -1), v.unsqueeze(-2)) # (B, H_kv, d, d)
             # 广播 g 以匹配 state 维度
+            # g: [B, num_kv_heads, 1, head_dim]
             new_state = state + g.unsqueeze(-1) * kv_outer
             
             # 输出: Q @ State
             # 需要将 State (KV_Heads) 广播给 Q (Num_Heads)
             # GQA 逻辑：每 (num_heads // num_kv_heads) 个 Q 共享一个 State
-            groups = self.num_heads // self.num_kv_heads
-            state_expanded = state.repeat_interleave(groups, dim=1) # (B, Num_Heads, d, d)
+            groups = self.num_heads // self.num_kv_heads  # 16/4=4，每4个Q头共享1个KV头
+            state_expanded = state.repeat_interleave(groups, dim=1) # (B, Num_Heads, d, d)，示例：(2, 16, 128, 128)
             
+            # Q @ State: [B, num_heads, 1, head_dim] @ [B, num_heads, head_dim, head_dim] -> [B, num_heads, 1, head_dim]
             output = torch.matmul(q.unsqueeze(-2), state_expanded).squeeze(-2)
             output = output.transpose(1, 2).contiguous().view(B, N, self.hidden_size)
             
@@ -141,24 +155,36 @@ class GatedDeltaNet(nn.Module):
 
         else:
             # 训练模式：用"顺序递推"实现（正确但慢），先保证数学正确
+            # state 形状：(B, num_kv_heads, head_dim, head_dim)
+            # 示例：(2, 4, 128, 128)
             state = torch.zeros(B, self.num_kv_heads, self.head_dim, self.head_dim, device=x.device, dtype=q.dtype)
             outputs = []
-            groups = self.num_heads // self.num_kv_heads
+            groups = self.num_heads // self.num_kv_heads  # 16/4=4
 
+            # 顺序遍历序列中的每个 token
             for t in range(N):
-                k_t = k[:, :, t, :]  # [B, H_kv, d]
-                v_t = v[:, :, t, :]  # [B, H_kv, d]
-                g_t = g[:, :, t, :]  # [B, H_kv, d]
+                # 取出第 t 个位置的 K/V/G
+                k_t = k[:, :, t, :]  # [B, num_kv_heads, head_dim]，示例：(2, 4, 128)
+                v_t = v[:, :, t, :]  # [B, num_kv_heads, head_dim]
+                g_t = g[:, :, t, :]  # [B, num_kv_heads, head_dim]
 
+                # 外积计算 k^T @ v -> [B, num_kv_heads, head_dim, head_dim]
                 outer = k_t.unsqueeze(-1) * v_t.unsqueeze(-2)          # [B,H_kv,d,d]
+                # gated update: state = state + g_t * outer
                 state = state + g_t.unsqueeze(-1) * outer              # gated update
 
-                state_expanded = state.repeat_interleave(groups, dim=1) # [B,H_q,d,d]
-                q_t = q[:, :, t, :]                                     # [B,H_q,d]
-                out_t = torch.matmul(q_t.unsqueeze(-2), state_expanded).squeeze(-2)  # [B,H_q,d]
+                # 扩展 state 以匹配 Q 头数
+                state_expanded = state.repeat_interleave(groups, dim=1) # [B,num_heads,d,d]
+                # 取第 t 个 Q 向量
+                q_t = q[:, :, t, :]                                     # [B,num_heads,d]
+                # Q @ State -> [B,num_heads,1,d] @ [B,num_heads,d,d] -> [B,num_heads,d]
+                out_t = torch.matmul(q_t.unsqueeze(-2), state_expanded).squeeze(-2)
                 outputs.append(out_t)
 
-            output = torch.stack(outputs, dim=2)  # [B, H_q, N, d]
+            # 堆叠所有时间步的输出
+            # outputs: N 个 [B, num_heads, head_dim] -> [B, num_heads, N, head_dim]
+            output = torch.stack(outputs, dim=2)
+            # 转换形状：[B, num_heads, N, head_dim] -> [B, N, num_heads, head_dim] -> [B, N, H]
             output = output.transpose(1, 2).contiguous().view(B, N, self.hidden_size)
             return self.out_proj(output), None
 
@@ -181,190 +207,44 @@ class StandardAttention(nn.Module):
         self.mrope = MROPE(self.head_dim)
 
     def forward(self, x, positions, mask=None):
-        #falsh_attention
+        # x: 输入 hidden states，形状 [B, N, H]，示例：[2, 228, 2048]
+        # positions: 3D 位置编码，形状 [B, N, 3]，示例：[2, 228, 3]
         B, N, _ = x.shape
-        q = self.q_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(B, N, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(B, N, self.num_kv_heads, self.head_dim).transpose(1, 2)
         
-        # M-RoPE
+        # 投影：Q/K/V 计算
+        # q: [B, N, H] -> [B, N, num_heads*head_dim] -> [B, N, num_heads, head_dim] -> [B, num_heads, N, head_dim]
+        # 示例：[2, 228, 2048] -> [2, 16, 228, 128]
+        q = self.q_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(B, N, self.num_kv_heads, self.head_dim).transpose(1, 2)  # [B, num_kv_heads, N, head_dim]
+        v = self.v_proj(x).view(B, N, self.num_kv_heads, self.head_dim).transpose(1, 2)  # [B, num_kv_heads, N, head_dim]
+        
+        # M-RoPE：应用 3D 位置编码旋转
+        # 输出形状不变
         q, k = self.mrope(q, k, positions)
         
         # GQA 扩展 K/V 以匹配 Q
+        # groups = num_heads / num_kv_heads = 16/4 = 4
+        # 扩展后：k, v 从 [B, 4, N, 128] -> [B, 16, N, 128]
         groups = self.num_heads // self.num_kv_heads
-        k = k.repeat_interleave(groups, dim=1)
-        v = v.repeat_interleave(groups, dim=1)
+        k = k.repeat_interleave(groups, dim=1)  # [B, num_heads, N, head_dim]
+        v = v.repeat_interleave(groups, dim=1)  # [B, num_heads, N, head_dim]
         
         # Softmax Attention
+        # scores: [B, num_heads, N, N]，示例：[2, 16, 228, 228]
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         if mask is not None:
             scores = scores.masked_fill(mask == 0, float('-inf'))
         attn = F.softmax(scores, dim=-1)
         
+        # 输出: attn @ v -> [B, num_heads, N, head_dim] -> [B, N, num_heads, head_dim] -> [B, N, H]
         out = torch.matmul(attn, v).transpose(1, 2).contiguous().view(B, N, -1)
         return self.out_proj(out)
 
 # ==========================================
 # 4.1 MTP (Multi-Token Prediction) 模块
 # ==========================================
-class SharedMTPHead(nn.Module):
-    """
-    共享参数的 MTP 预测头
-    同一套参数预测 t+1, t+2, t+3... 多个未来 token
-    避免传统实现中参数量随预测步数线性增长的问题
-    """
-    def __init__(self, hidden_size: int, vocab_size: int):
-        super().__init__()
-        self.proj = nn.Linear(hidden_size, vocab_size, bias=False)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.proj(hidden_states)
-
-
-class MTPModel(nn.Module):
-    """
-    MTP 模型：包装主干 LM，添加多步预测能力
-    支持训练时的 MTP loss 计算和推理时的 draft 生成
-    """
-    def __init__(self, backbone: nn.Module, hidden_size: int, vocab_size: int, mtp_k: int = 3):
-        super().__init__()
-        self.backbone = backbone
-        self.mtp_head = SharedMTPHead(hidden_size, vocab_size)
-        self.mtp_k = mtp_k
-        self.hidden_size = hidden_size
-        self.vocab_size = vocab_size
-
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
-                attention_mask: torch.Tensor = None, labels: torch.Tensor = None,
-                output_hidden_states: bool = True):
-        """
-        前向传播
-        Args:
-            input_ids: [B, T] 输入 token IDs
-            positions: [B, T] 位置编码
-            attention_mask: [B, T] 注意力掩码
-            labels: [B, T] 标签（用于计算 loss）
-            output_hidden_states: 是否输出隐藏状态
-        Returns:
-            logits_main: 主干 LM 的 logits
-            logits_mtp_list: MTP 多步预测的 logits 列表
-            loss: 总 loss（如果提供了 labels）
-            hidden_states: 最后一层隐藏状态
-        """
-        out = self.backbone(input_ids=input_ids, positions=positions,
-                           attention_mask=attention_mask, output_hidden_states=output_hidden_states)
-
-        if isinstance(out, tuple):
-            hidden = out[0]
-            past_states = out[1] if len(out) > 1 else None
-            aux_loss = out[2] if len(out) > 2 else None
-        else:
-            hidden = out.hidden_states[-1] if output_hidden_states else out.last_hidden_state
-            past_states = None
-            aux_loss = None
-
-        logits_main = self.mtp_head(hidden)
-
-        logits_mtp_list = []
-        loss_mtp_total = 0.0
-
-        if labels is not None and self.training:
-            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
-
-            # main loss（shift=1）
-            shift_logits = logits_main[:, :-1, :].contiguous()
-            shift_labels = labels[:, 1:].contiguous()
-            loss_main = loss_fct(
-                shift_logits.view(-1, self.vocab_size),
-                shift_labels.view(-1),
-            )
-
-            # mtp loss（shift=2..K）
-            loss_mtp_total = 0.0
-            logits_mtp_list = []
-            for step in range(2, self.mtp_k + 1):
-                logits_step = self.mtp_head(hidden[:, :-step, :].contiguous())  # [B, T-step, V]
-                labels_step = labels[:, step:].contiguous()                     # [B, T-step]
-
-                loss_step = loss_fct(
-                    logits_step.view(-1, self.vocab_size),
-                    labels_step.view(-1),
-                )
-                loss_mtp_total = loss_mtp_total + loss_step
-                logits_mtp_list.append(logits_step)
-
-            loss_mtp = loss_mtp_total / max(1, (self.mtp_k - 1))
-            mtp_weight = 0.3
-            total_loss = loss_main + mtp_weight * loss_mtp
-
-            if aux_loss is not None:
-                total_loss = total_loss + 0.01 * aux_loss
-
-            return {
-                'logits_main': logits_main,
-                'logits_mtp_list': logits_mtp_list,
-                'loss': total_loss,
-                'loss_main': float(loss_main.detach().cpu()),
-                'loss_mtp': float(loss_mtp.detach().cpu()),
-                'hidden_states': hidden,
-                'past_states': past_states,
-            }
-
-        return {
-            'logits_main': logits_main,
-            'logits_mtp_list': logits_mtp_list,
-            'hidden_states': hidden,
-            'past_states': past_states
-        }
-
-    @torch.no_grad()
-    def draft_generate(
-        self,
-        input_ids: torch.Tensor,          # [1, T]
-        positions: torch.Tensor,          # [1, T, 3]
-        spec_k: int = 4,
-        eos_token_id: int | None = None,
-        temperature: float = 0.0,         # 0=greedy
-        top_k: int = 0,
-    ):
-        self.eval()
-        out_ids = input_ids
-        out_pos = positions
-        draft_tokens = []
-
-        for _ in range(spec_k):
-            logits, _, _ = self.backbone(
-                input_ids=out_ids,
-                positions=out_pos,
-                pixel_values=None,
-                attention_mask=None,
-                use_cache=False,
-                output_hidden_states=False,
-            )
-            next_logits = logits[:, -1, :]  # [1, V]
-
-            if temperature and temperature > 0:
-                l = next_logits / temperature
-                if top_k and top_k > 0:
-                    v, _ = torch.topk(l, top_k, dim=-1)
-                    l = torch.where(l < v[:, [-1]], torch.tensor(float("-inf"), device=l.device), l)
-                probs = torch.softmax(l, dim=-1)
-                next_id = torch.multinomial(probs, num_samples=1)  # [1,1]
-            else:
-                next_id = torch.argmax(next_logits, dim=-1, keepdim=True)  # [1,1]
-
-            tok = int(next_id.item())
-            draft_tokens.append(tok)
-
-            out_ids = torch.cat([out_ids, next_id], dim=1)
-            t_next = out_pos[:, -1, 0] + 1
-            next_pos = torch.stack([t_next, torch.zeros_like(t_next), torch.zeros_like(t_next)], dim=-1)  # [1,3]
-            out_pos = torch.cat([out_pos, next_pos.unsqueeze(1)], dim=1)  # [1, T+1, 3]
-
-            if eos_token_id is not None and tok == int(eos_token_id):
-                break
-
-        return draft_tokens
+# 已抽离到独立模块，避免 backbone 文件过长且难维护
+from .mtp import SharedMTPHead, MTPModel
 
 # ==========================================
 # 5. Qwen3.5 Block & Model

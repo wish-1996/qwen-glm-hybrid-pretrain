@@ -57,13 +57,20 @@ class SharedExpertMoE(nn.Module):
         self.gate = nn.Linear(self.hidden_size, self.num_experts, bias=False)
 
     def forward(self, x):
-        # 稀疏专家路径
+        # x: 输入 hidden states，形状 [B, N, H]，示例：[2, 228, 2048]
+        # B=批次大小, N=序列长度, H=hidden_size
         B, N, D = x.shape
+        
+        # 展平以便处理：[B, N, H] -> [B*N, H]
         flat_x = x.view(-1, D)
         
-        # 路由得分
-        router_logits = self.gate(flat_x) # (B*N, num_experts)
+        # 路由得分计算
+        # gate: [B*N, H] -> [B*N, num_experts]
+        # 示例：[228, 2048] -> [228, 192]
+        router_logits = self.gate(flat_x)
+        # 计算 softmax 概率：[B*N, num_experts]
         routing_weights = F.softmax(router_logits, dim=-1)
+        # 取 top-k：[B*N, top_k]
         top_k_weights, top_k_indices = torch.topk(routing_weights, self.top_k, dim=-1)
         
         # 归一化权重
@@ -72,45 +79,50 @@ class SharedExpertMoE(nn.Module):
         # --- 计算负载均衡损失 (仅在训练时) ---
         if self.training:
             # 1. 计算"路由器建议"的负载 (Router Prob)
-            router_prob_expert = routing_weights.mean(dim=0)  # 每个专家被建议的平均概率 [E]
+            # routing_weights.mean(dim=0): [B*N, E] -> [E]，每个专家被建议的平均概率
+            router_prob_expert = routing_weights.mean(dim=0)  # [num_experts]，示例：[192]
             
             # 2. 计算"实际发生"的负载 (Expert Frequency)
-            expert_mask = torch.zeros_like(routing_weights)  # [B*S, E]
+            expert_mask = torch.zeros_like(routing_weights)  # [B*N, num_experts]
             # 填充 top-k 的位置为 1
             expert_mask.scatter_(1, top_k_indices, 1)
-            # 计算实际频率
-            expert_frequency = expert_mask.mean(dim=0)  # [E]
+            # 计算实际频率：[num_experts]
+            expert_frequency = expert_mask.mean(dim=0)  # [num_experts]
             
             # 3. 计算辅助损失 (Aux Loss)
+            # 公式：sum(router_prob * expert_frequency) * num_experts
             aux_loss = (router_prob_expert * expert_frequency).sum() * self.num_experts
             
             # 将辅助损失保存为属性，方便外部获取
             self.aux_loss = aux_loss
         
-        # 优化的 MoE 计算方式，参考官方实现
+        # 初始化输出：[B*N, H]
         sparse_out = torch.zeros_like(flat_x)
         
-        # 为每个专家创建掩码
+        # 遍历每个专家
         for expert_idx in range(self.num_experts):
             # 找出选择当前专家的所有 token 位置
             # 遍历 top-k 个位置
             for k in range(self.top_k):
-                # 创建掩码：当前专家在第 k 个位置被选中
+                # mask: [B*N]，当前专家在第 k 个位置被选中的 token
                 mask = (top_k_indices[:, k] == expert_idx)
                 if mask.any():
-                    # 获取选中的 token
+                    # 获取选中的 token：[selected_num, H]
                     selected_tokens = flat_x[mask]
-                    # 获取对应的权重
+                    # 获取对应的权重：[selected_num]
                     weights = top_k_weights[mask, k]
-                    # 计算专家输出
+                    # 计算专家输出：[selected_num, H]
                     expert_output = self.experts[expert_idx](selected_tokens)
-                    # 加权并累加到输出
+                    # 加权并累加到输出：[selected_num, H]
                     sparse_out[mask] += expert_output * weights.unsqueeze(-1)
-                
-        # 添加共享专家的输出
+        
+        # 添加共享专家的输出（所有 token 都经过）
+        # shared_out: [B*N, H]
         shared_out = self.shared_expert(flat_x)
+        # 总输出 = 稀疏专家输出 + 共享专家输出
         total_out = sparse_out + shared_out
         
+        # 恢复原始形状：[B*N, H] -> [B, N, H]
         total_out = total_out.view(B, N, D)
         
         return total_out

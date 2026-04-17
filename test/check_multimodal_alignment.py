@@ -100,7 +100,6 @@ def main():
     pad_count = int((attention_mask == 0).sum().item())
     neg_count = int((text_region == -100).sum().item())
     print("text pad tokens:", pad_count, "| text labels == -100:", neg_count)
-
     print("\nPASS: multimodal alignment looks correct.")
 
 

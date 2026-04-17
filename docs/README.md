@@ -3,7 +3,7 @@
 目标：每一项“生产级要素”都对应一份可阅读、可复现、可扩展的说明文档。
 
 1. [01 训练入口与配置](./01_training_entry.md)
-2. [02 模型侧：原生多模态 + MoE](./02_model_architecture.md)
+2. [02 模型侧：原生多模态 + MoE](./02_model_architecture.md)（含端到端 shape walkthrough：从 batch 到 logits）
 3. [03 并行与通信：DP/TP/PP/EP 与 all-to-all](./03_parallelism_and_communication.md)
 4. [04 训练稳定性与内存：BF16、重计算、梯度裁剪、ZeRO](./04_stability_and_memory.md)
 5. [05 多模态序列对齐（Step 1）](./05_multimodal_sequence_alignment.md)

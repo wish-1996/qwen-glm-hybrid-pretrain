@@ -17,8 +17,8 @@ import argparse
 import time
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
-from model.qwen35_tiny_model import Qwen35Model
-from configs.qwen35_config import Qwen35Config
+from model.hybrid_model import HybridMMMoEModel
+from configs.model_config import ModelConfig
 from data.multimodal_data_loader import get_data_loader
 
 
@@ -64,8 +64,8 @@ def train(args):
     
     # 初始化模型
     print("Initializing model...")
-    config = Qwen35Config()
-    model = Qwen35Model(config, use_multimodal=True)
+    config = ModelConfig()
+    model = HybridMMMoEModel(config, use_multimodal=True)
     model.to(device)
     print("Model initialized and moved to device.")
     

@@ -116,7 +116,25 @@ shift_labels = labels_total[:, 1:].contiguous()
 3. **位置编码错误**：确保位置编码的构造正确，特别是图像部分的空间位置
 
 ## 下一步优化
-
 1. **动态序列长度**：支持不同大小的图像和文本输入
 2. **序列打包**：实现序列打包以提高训练效率
 3. **跨样本边界掩码**：处理序列打包时的跨样本边界
+
+---
+
+## 快速自检（强烈建议合并后先跑）
+
+如果你想确认“第 1 步对齐”是不是真的生效（尤其是 image 部分 labels 是否全为 -100），运行：
+
+```bash
+python test/check_multimodal_alignment.py \
+  --data_dir ./data \
+  --tokenizer_path ./tokenizers/qwen3-0.6b \
+  --batch_size 2 \
+  --max_length 32
+```
+
+预期输出要点：
+- `T_img` 打印为 **196**（224/16=14，14^2=196）
+- `labels_total` shape 为 `[B, 196 + T_text]`
+- `image labels all -100: True`

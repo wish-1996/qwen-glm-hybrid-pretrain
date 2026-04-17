@@ -17,7 +17,7 @@ import argparse
 import time
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
-from mdel.qwen35_tiny_model import Qwen35Model
+from model.qwen35_tiny_model import Qwen35Model
 from configs.qwen35_config import Qwen35Config
 from data.multimodal_data_loader import get_data_loader
 
@@ -52,7 +52,13 @@ def train(args):
         tokenizer=tokenizer,
         batch_size=args.batch_size,
         max_length=args.max_length,
-        image_size=args.image_size
+        image_size=args.image_size,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_memory,
+        distributed=args.distributed,
+        rank=rank,
+        world_size=world_size,
+        seed=args.seed,
     )
     print(f"Data loader created. Number of batches: {len(train_loader)}")
     
@@ -89,7 +95,9 @@ def train(args):
     model.train()
     for epoch in range(args.epochs):
         if args.distributed:
-            train_loader.sampler.set_epoch(epoch)
+            # DDP 下我们在 DataLoader 里使用 DistributedSampler
+            if hasattr(train_loader, "sampler") and hasattr(train_loader.sampler, "set_epoch"):
+                train_loader.sampler.set_epoch(epoch)
         
         start_time = time.time()
         total_loss = 0
@@ -183,8 +191,8 @@ def main():
     parser = argparse.ArgumentParser(description='Multimodal Model Training')
     
     # 数据参数
-    parser.add_argument('--data_dir', type=str, default='d:\\study_project\\tran_qwen3_model\\data', help='Data directory')
-    parser.add_argument('--tokenizer_path', type=str, default='d:\\study_project\\tran_qwen3_model\\tokenizers\\qwen3-0.6b', help='Tokenizer path')
+    parser.add_argument('--data_dir', type=str, default='./data', help='Data directory (should contain image_cache/ etc.)')
+    parser.add_argument('--tokenizer_path', type=str, default='./tokenizers/qwen3-0.6b', help='Tokenizer path')
     
     # 模型参数
     parser.add_argument('--max_length', type=int, default=512, help='Max sequence length')
@@ -200,6 +208,11 @@ def main():
     
     # 分布式训练
     parser.add_argument('--distributed', action='store_true', help='Use distributed training')
+
+    # DataLoader 参数（生产级最常用的几个）
+    parser.add_argument('--num_workers', type=int, default=4, help='DataLoader workers')
+    parser.add_argument('--pin_memory', action='store_true', help='Enable pin_memory for DataLoader')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for data sampling')
     
     # 其他参数
     parser.add_argument('--output_dir', type=str, default='./checkpoints', help='Output directory')

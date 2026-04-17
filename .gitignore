@@ -1,0 +1,23 @@
+# Output directories
+outputs/
+checkpoints/
+
+# Python files
+__pycache__/
+*.pyc
+
+# IDE files
+.idea/
+.vscode/
+
+# Data files
+#data/image_cache/
+#data/ultrafineweb_zh/
+
+# Environment files
+.env
+venv/
+env/
+
+# Log files
+*.log

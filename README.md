@@ -57,8 +57,11 @@ bash scripts/smoke_1node_1gpu.sh
 
 ## Roadmap（建议的下一步）
 
-1) 训练入口升级为 YAML/JSON 配置体系（CLI 可覆盖）  
-2) 增加 `torchrun` 的 1node/8gpu smoke 脚本与 DDP 训练说明  
-3) 增加 MoE 负载监控（每个 expert token 直方图）与通信耗时统计  
-4) 增加 packing 与跨样本边界 mask（生产预训练关键点）  
-5) 增加 checkpoint resume（包含 RNG states）与更完善的 eval（PPL + probe）
+更完整的"生产级落地计划 + 勾选清单"请直接看：
+
+- [docs/09_production_plan.md](docs/09_production_plan.md)
+
+接下来优先级最高的几项：
+1) MoE 路由/负载监控（expert load、topk 分布、aux_loss 曲线）
+2) 长上下文阶段训练：4k→8k（linear）→16k/32k（dynamic_ntk + 稀疏 attention）
+3) StandardAttention 接入 flash-attn；线性注意力训练路径去掉 Python for-loop

@@ -5,6 +5,7 @@
 ## 目标
 
 将当前代码库从一个"可运行实验"转变为"可上线生产"的预训练系统，确保：
+
 - 训练稳定性（BF16、梯度裁剪、容错）
 - 训练效率（并行、显存优化、吞吐）
 - 可复现性（seed、checkpoint、log）
@@ -20,12 +21,12 @@
 - [x] M-RoPE（3D 位置编码）
 - [x] 多模态融合（图像 + 文本）
 - [x] MTP（Multi-Token Prediction）
-- [x] RoPE Scaling（linear / ntk / dynamic_ntk）
+- [x] RoPE Scaling（linear / ntk / dynamic\_ntk）
 
 ### 1.2 数据管线
 
 - [x] CSV 图文数据加载
-- [x] ultrafineweb_zh 文本数据混合
+- [x] ultrafineweb\_zh 文本数据混合
 - [x] 多模态序列对齐
 - [x] 图像缓存机制
 - [x] 容错处理（坏图像、格式错误）
@@ -51,7 +52,7 @@
 
 - [x] epoch-based 检查点保存
 - [x] step-based 检查点保存
-- [x] 完整检查点内容（model / optimizer / scheduler / scaler / rng_state）
+- [x] 完整检查点内容（model / optimizer / scheduler / scaler / rng\_state）
 - [x] 检查点恢复（resume）
 - [x] 分布式检查点处理
 
@@ -59,15 +60,15 @@
 
 - [x] 结构化日志（JSONL 格式）
 - [x] rank0 专用日志文件
-- [x] 训练指标记录（loss、grad_norm、tokens_per_sec）
-- [x] 时间统计（data_time、step_time）
+- [x] 训练指标记录（loss、grad\_norm、tokens\_per\_sec）
+- [x] 时间统计（data\_time、step\_time）
 
 ### 2.4 分布式训练
 
 - [x] torchrun 兼容初始化
-- [x] LOCAL_RANK / RANK / WORLD_SIZE 环境变量处理
+- [x] LOCAL\_RANK / RANK / WORLD\_SIZE 环境变量处理
 - [x] DDP GPU 绑定
-- [x] 分布式同步（all_reduce for tokens）
+- [x] 分布式同步（all\_reduce for tokens）
 
 ## 阶段三：性能优化
 
@@ -130,7 +131,7 @@
 
 ### 5.3 自动化
 
-- [ ] 训练脚本化（run_train.sh）
+- [ ] 训练脚本化（run\_train.sh）
 - [ ] 多节点训练脚本
 - [ ] 数据准备流水线
 
@@ -181,6 +182,7 @@ python train/train_multimodal.py \
 ### Q: 如何选择 BF16 还是 FP16？
 
 A: BF16 优先，原因：
+
 - 动态范围更大，训练更稳定
 - 不需要 GradScaler（FP16 需要）
 - 硬件支持更好（H100 / A100）
@@ -214,7 +216,9 @@ python train/train_multimodal.py \
 ## 贡献指南
 
 欢迎提交 PR 来帮助完善本项目！请确保：
+
 - 代码符合项目风格
 - 添加了必要的注释和文档
 - 通过了相关测试
 - 更新了本文档的检查清单（如有新增特性）
+

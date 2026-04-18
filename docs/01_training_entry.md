@@ -54,3 +54,52 @@ python train/train_multimodal.py \
     --pin_memory \
     --seed 42
 ```
+
+---
+
+## torchrun 多卡启动（DDP，生产口径）
+
+`train/train_multimodal.py` 支持 torchrun 标准环境变量（`LOCAL_RANK/RANK/WORLD_SIZE`），设备绑定使用 `LOCAL_RANK`。
+
+### 1-node 8-GPU 示例
+
+```bash
+torchrun --standalone --nproc_per_node=8 train/train_multimodal.py \
+  --distributed \
+  --data_dir ./data \
+  --tokenizer_path ./tokenizers/qwen3-0.6b \
+  --max_length 4096 \
+  --image_size 224 \
+  --batch_size 1 \
+  --gradient_accumulation_steps 8 \
+  --bf16 \
+  --learning_rate 1e-5 \
+  --warmup_steps 100 \
+  --output_dir ./checkpoints_4k \
+  --log_interval 10 \
+  --save_steps 100
+```
+
+### 断点恢复（resume）
+
+```bash
+torchrun --standalone --nproc_per_node=8 train/train_multimodal.py \
+  --distributed \
+  --resume_from ./checkpoints_4k/checkpoint_step_1000.pt \
+  --data_dir ./data \
+  --tokenizer_path ./tokenizers/qwen3-0.6b \
+  --max_length 4096 \
+  --image_size 224 \
+  --batch_size 1 \
+  --gradient_accumulation_steps 8 \
+  --bf16 \
+  --learning_rate 1e-5 \
+  --warmup_steps 100 \
+  --output_dir ./checkpoints_4k \
+  --log_interval 10
+```
+
+### 训练指标输出
+
+rank0 会在 `output_dir` 下写入：
+- `metrics_rank0.jsonl`：结构化训练日志（loss/lr/grad_norm/tokens_per_sec 等）

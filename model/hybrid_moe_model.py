@@ -14,7 +14,15 @@ class MROPE(nn.Module):
     简化可用版 M-RoPE（对齐 Qwen3.5 的 mrope_section 思路）
     - head_dim=128 时：half_dim=64，mrope_section=[11,11,10] 的和=32，对应 64 维（每个"旋转对"2维）
     """
-    def __init__(self, head_dim: int, mrope_section=None, theta=10000.0):
+    def __init__(
+        self,
+        head_dim: int,
+        mrope_section=None,
+        theta=10000.0,
+        *,
+        rope_scaling_type: str = "none",
+        rope_scaling_factor: float = 1.0,
+    ):
         super().__init__()
         self.head_dim = head_dim
         self.half_dim = head_dim // 2
@@ -42,6 +50,10 @@ class MROPE(nn.Module):
         inv_freq = 1.0 / (theta ** (torch.arange(0, self.half_dim, dtype=torch.float32) / self.half_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
+        # RoPE scaling（长上下文策略）
+        self.rope_scaling_type = str(rope_scaling_type or "none")
+        self.rope_scaling_factor = float(rope_scaling_factor or 1.0)
+
     def _rotate_half(self, x):
         x1 = x[..., : x.shape[-1] // 2]
         x2 = x[..., x.shape[-1] // 2 :]
@@ -57,6 +69,20 @@ class MROPE(nn.Module):
         pos_t = positions_3d[:, :, 0].to(device=device, dtype=torch.float32)  # [B,T]
         pos_h = positions_3d[:, :, 1].to(device=device, dtype=torch.float32)
         pos_w = positions_3d[:, :, 2].to(device=device, dtype=torch.float32)
+
+        # -------------------------
+        # RoPE scaling：只对 t 轴做缩放（更符合多模态 3D RoPE 的语义）
+        # -------------------------
+        if self.rope_scaling_type == "linear":
+            if self.rope_scaling_factor and self.rope_scaling_factor != 1.0:
+                pos_t = pos_t / self.rope_scaling_factor
+        elif self.rope_scaling_type in ("none", "", None):
+            pass
+        elif self.rope_scaling_type in ("ntk", "dynamic_ntk"):
+            # 预留：后续实现（动态 NTK 通常需要结合实际上下文长度）
+            raise NotImplementedError(f"rope_scaling_type={self.rope_scaling_type} not implemented yet")
+        else:
+            raise ValueError(f"Unknown rope_scaling_type: {self.rope_scaling_type}")
 
         nt, nh, nw = self.mrope_section
         inv_t = self.inv_freq[:nt]
@@ -97,7 +123,11 @@ class GatedDeltaNet(nn.Module):
         self.out_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         
         # 初始化 MROPE
-        self.mrope = MROPE(self.head_dim)
+        self.mrope = MROPE(
+            self.head_dim,
+            rope_scaling_type=getattr(config, "rope_scaling_type", "none"),
+            rope_scaling_factor=getattr(config, "rope_scaling_factor", 1.0),
+        )
 
     def forward(self, x, positions, past_state=None, use_cache=False):
         # x: 输入 hidden states，形状 [B, N, H]，示例：[2, 228, 2048]
@@ -204,7 +234,11 @@ class StandardAttention(nn.Module):
         self.out_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
         
         # 初始化 MROPE
-        self.mrope = MROPE(self.head_dim)
+        self.mrope = MROPE(
+            self.head_dim,
+            rope_scaling_type=getattr(config, "rope_scaling_type", "none"),
+            rope_scaling_factor=getattr(config, "rope_scaling_factor", 1.0),
+        )
 
     def forward(self, x, positions, mask=None):
         # x: 输入 hidden states，形状 [B, N, H]，示例：[2, 228, 2048]
@@ -448,12 +482,12 @@ class HybridMMMoEModel(nn.Module):
 
         支持两种输入格式：
 
-        A) 旧格式（“旁路 pixel_values + concat embeddings”）
+        A) 旧格式（"旁路 pixel_values + concat embeddings"）
            - input_ids: [B, T_text]
            - pixel_values: [B, 3, H, W]
            - 模型内部把 image_embeds 与 text_embeds 直接 concat
 
-        B) 新格式（“token 序列里显式占位 <image_pad>”）
+        B) 新格式（"token 序列里显式占位 <image_pad>"）
            - input_ids: [B, T_total]，其中前 T_img 个位置是 image_pad_token_id
            - pixel_values: [B, 3, H, W]
            - 模型内部用 image_embeds 替换这段占位符 embedding

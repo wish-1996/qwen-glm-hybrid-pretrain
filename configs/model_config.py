@@ -34,15 +34,15 @@ class ModelConfig:
     # -------------------------
     # rope_scaling_type:
     # - "none"       : 不做 scaling（超出训练长度属于 RoPE 外推，效果通常会掉）
-    # - "linear"     : 线性缩放（把 pos_t 除以 factor），工程改动最小，适合作为第一阶段
-    # - "ntk"        : 预留（后续实现）
-    # - "dynamic_ntk": 预留（后续实现，推理时按实际长度动态调频率）
+    # - "linear"     : 线性缩放（把 pos_t 除以 factor）。等价于把角度 θ 缩小 1/factor，改动最小，适合作为第一阶段
+    # - "ntk"        : 固定 NTK（用 factor 作为 alpha，改变 theta/base，从而改变频率分布；更"保短程、稳长程"）
+    # - "dynamic_ntk": 动态 NTK（alpha=max(1, L_current/base_len)，随实际长度变化；短上下文 α≈1，长上下文才增强缩放）
     #
     # 注意：在 3D RoPE（t,h,w）里，通常只对文本时间轴 t 做 scaling；
     # 图像 h/w 是空间坐标，不建议跟着上下文延长策略一起缩放。
     rope_scaling_type: str = "linear"
     rope_scaling_factor: float = 2.0
-    # dynamic_ntk 需要知道“训练时的上下文长度”（基准长度）
+    # dynamic_ntk 需要知道"训练时的上下文长度"（基准长度）
     # - 例如你计划按阶段训练：4k 起步，则 base=4096
     # - 当实际序列长度 L_current > base 时，dynamic_ntk 会令 alpha=max(1, L_current/base)
     rope_scaling_base_len: int = 4096

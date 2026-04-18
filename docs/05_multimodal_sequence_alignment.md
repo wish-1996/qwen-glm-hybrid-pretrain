@@ -106,7 +106,7 @@ shift_labels = labels_total[:, 1:].contiguous()
 
 ## 真实数据逐步举例（一步步对齐到模型 forward 所需的 T_total）
 
-这里用 `docs/05_data_pipeline.md` 中同一条真实样本继续往下走，展示：
+这里用 `docs/06_data_pipeline.md` 中同一条真实样本继续往下走，展示：
 `(input_ids, attention_mask, pixel_values)` 如何变成模型 forward 需要的
 `attention_mask_total / labels_total`（长度变为 `T_total=T_img+T_text`）。
 

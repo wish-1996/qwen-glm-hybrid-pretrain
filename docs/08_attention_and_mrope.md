@@ -16,21 +16,21 @@ class StandardAttention(nn.Module):
         q = self.q_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, N, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, N, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        
+
         # 应用 M-RoPE
         q, k = self.mrope(q, k, positions)
-        
+
         # GQA 扩展
         groups = self.num_heads // self.num_kv_heads
         k = k.repeat_interleave(groups, dim=1)
         v = v.repeat_interleave(groups, dim=1)
-        
+
         # 计算注意力
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         if mask is not None:
             scores = scores.masked_fill(mask == 0, float('-inf'))
         attn = F.softmax(scores, dim=-1)
-        
+
         # 输出
         out = torch.matmul(attn, v).transpose(1, 2).contiguous().view(B, N, -1)
         return self.out_proj(out)
@@ -48,14 +48,14 @@ class GatedDeltaNet(nn.Module):
         k = self.k_proj(x).view(B, N, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, N, self.num_kv_heads, self.head_dim).transpose(1, 2)
         g = torch.sigmoid(self.gate_proj(x)).view(B, N, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        
+
         # 应用 M-RoPE
         q, k = self.mrope(q, k, positions)
-        
+
         # 归一化
         q = F.normalize(q, p=2, dim=-1)
         k = F.normalize(k, p=2, dim=-1)
-        
+
         # 增量推理或训练模式
         if use_cache and N == 1:
             # 增量更新 state
@@ -87,29 +87,29 @@ class MROPE(nn.Module):
         pos_t = positions_3d[:, :, 0].to(device=device, dtype=torch.float32)
         pos_h = positions_3d[:, :, 1].to(device=device, dtype=torch.float32)
         pos_w = positions_3d[:, :, 2].to(device=device, dtype=torch.float32)
-        
+
         # RoPE scaling：只对 t 轴做缩放
         if self.rope_scaling_type == "linear":
             if self.rope_scaling_factor and self.rope_scaling_factor != 1.0:
                 pos_t = pos_t / self.rope_scaling_factor
-        
+
         # 计算旋转角度
         nt, nh, nw = self.mrope_section
         inv_t = self.inv_freq[:nt]
         inv_h = self.inv_freq[nt:nt + nh]
         inv_w = self.inv_freq[nt + nh:nt + nh + nw]
-        
+
         ang_t = torch.einsum("bt,d->btd", pos_t, inv_t)
         ang_h = torch.einsum("bt,d->btd", pos_h, inv_h)
         ang_w = torch.einsum("bt,d->btd", pos_w, inv_w)
         angles = torch.cat([ang_t, ang_h, ang_w], dim=-1)
-        
+
         # 应用旋转
         cos = torch.cos(angles).unsqueeze(1)
         sin = torch.sin(angles).unsqueeze(1)
         cos = torch.cat([cos, cos], dim=-1)
         sin = torch.cat([sin, sin], dim=-1)
-        
+
         q = (q * cos) + (self._rotate_half(q) * sin)
         k = (k * cos) + (self._rotate_half(k) * sin)
         return q, k
@@ -120,14 +120,60 @@ class MROPE(nn.Module):
 为了支持更长的上下文，实现了 RoPE 缩放策略：
 
 - **Linear Scaling**：将位置值除以缩放因子（默认 2.0）
-- **NTK Scaling**：预留，后续实现
-- **Dynamic NTK**：预留，后续实现
+- **NTK Scaling**：固定 NTK-aware base scaling（适合"已知目标长度/倍率"的场景）
+- **Dynamic NTK**：动态 NTK-aware base scaling（根据当前 seq_len 动态计算 alpha，短序列≈不缩放，长序列自动增强）
 
 **配置**：在 `configs/model_config.py` 中设置：
 ```python
 rope_scaling_type: str = "linear"
 rope_scaling_factor: float = 2.0
+rope_scaling_base_len: int = 4096
 ```
+
+dynamic NTK 的核心是：
+- `alpha = max(1, L_current / rope_scaling_base_len)`
+- `theta' = theta * alpha^(d/(d-2))`
+- 用 `theta'` 重新生成 t 轴的 `inv_freq`（h/w 不变）
+
+### dynamic NTK vs linear scaling：公式层面到底差在哪？
+
+先记住 RoPE 的角度公式（对某个频率分量 i）：
+
+`angle = t * inv_freq[i]`
+
+#### A) linear scaling（线性缩放 / 线性插值）
+
+做法：把位置缩小：
+
+- `t' = t / s`（`s=rope_scaling_factor`）
+- `angle' = (t/s) * inv_freq`
+
+特点：**所有频率分量都被同样缩小 1/s**（均匀缩放），实现简单、但可能会牺牲一点短程精度。
+
+#### B) (dynamic) NTK scaling
+
+做法：不直接改 t，而是改 "base/theta"，重新生成 `inv_freq`：
+
+- `alpha = max(1, L_current / base_len)`（dynamic 的关键：随长度变化）
+- `theta' = theta * alpha^(d/(d-2))`
+- `inv_freq' = 1 / theta'^(i/d)`
+- `angle' = t * inv_freq'`
+
+特点：**不同频率分量的变化幅度不同**（相当于"非均匀缩放频率分布"）：
+- 低频/长程相关的分量会更"保守"（更稳地外推到长距离）
+- 高频/短程相关的分量相对更接近原始，从而更容易保留短程能力
+
+这也是为什么工程上常见的节奏是：
+- 先用 linear 跑通 8k
+- 再用 dynamic_ntk 冲 16k/32k（更稳）
+
+### 为什么 3D RoPE 只对 t 轴 scaling，h/w 不动？
+
+因为：
+- `t` 是文本时间轴：会从 4k→8k→32k 持续增长，长上下文问题主要发生在这条轴上
+- `h/w` 是图像空间轴：范围固定（例如 14×14），不存在"上下文外推"
+
+把 `h/w` 也缩放会改变图像空间几何尺度，反而可能损伤视觉空间结构建模，所以保持不动更符合语义与工程直觉。
 
 ## 注意力与 M-RoPE 的结合
 

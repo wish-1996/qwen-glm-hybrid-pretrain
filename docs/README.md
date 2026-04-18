@@ -1,6 +1,6 @@
 # 文档索引（docs/）
 
-目标：每一项“生产级要素”都对应一份可阅读、可复现、可扩展的说明文档。
+目标：每一项"生产级要素"都对应一份可阅读、可复现、可扩展的说明文档。
 
 1. [01 训练入口与配置](./01_training_entry.md)
 2. [02 模型侧：原生多模态 + MoE](./02_model_architecture.md)（含端到端 shape walkthrough：从 batch 到 logits）
@@ -10,6 +10,7 @@
 6. [06 数据管线：格式、混合采样、packing 与 mask](./06_data_pipeline.md)
 7. [07 Checkpoint / 日志 / 评测](./07_checkpoint_logging_eval.md)
 8. [08 注意力实现与 3D RoPE（M-RoPE）](./08_attention_and_mrope.md)
+9. [09 生产级训练落地计划（Roadmap + Checklist）](./09_production_plan.md)
 
 ## Tools（可直接运行的工程脚本）
 

@@ -9,3 +9,8 @@
 5. [05 多模态序列对齐（Step 1）](./05_multimodal_sequence_alignment.md)
 6. [06 数据管线：格式、混合采样、packing 与 mask](./05_data_pipeline.md)
 7. [07 Checkpoint / 日志 / 评测](./06_checkpoint_logging_eval.md)
+
+## Tools（可直接运行的工程脚本）
+
+- 参数量估算（用于对齐 7B total / 0.6B active）：`python tools/param_count.py --help`
+- Speculative Decoding demo：`python tools/run_spec_decode_demo.py --help`

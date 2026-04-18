@@ -234,4 +234,63 @@ def mtp_loss_from_hidden(
     )
 
 
+def mtp_training_step(
+    *,
+    model: MTPModel,
+    input_ids: torch.Tensor,
+    positions: torch.Tensor,
+    attention_mask: torch.Tensor,
+    labels: torch.Tensor,
+    mtp_weight: float = 0.3,
+) -> tuple[torch.Tensor, dict]:
+    """
+    MTP 训练步骤示例（更像"可复用组件"的写法）。
+
+    注意：仓库主训练脚本目前在 train/train_multimodal.py；
+    这个函数主要用于：
+    - 你后续想把训练逻辑收敛进 MTPModel
+    - 或者写更简洁的 demo / unit test
+    """
+    model.train()
+    result = model(
+        input_ids=input_ids,
+        positions=positions,
+        attention_mask=attention_mask,
+        labels=labels,
+        output_hidden_states=True,
+    )
+    loss = result["loss"]
+    metrics = {
+        "loss_main": result.get("loss_main", 0.0),
+        "loss_mtp": result.get("loss_mtp", 0.0),
+        "total_loss": float(loss.detach().cpu()),
+        "mtp_weight": float(mtp_weight),
+    }
+    return loss, metrics
+
+
+def create_mtp_model(*, config, mtp_k: int = 3) -> MTPModel:
+    """
+    创建带 MTP 的模型（用于 speculative decoding demo 或 text-only 实验）。
+    """
+    from .hybrid_moe_model import HybridMMMoEModel
+
+    backbone = HybridMMMoEModel(config, use_multimodal=False)
+    return MTPModel(
+        backbone=backbone,
+        hidden_size=config.hidden_size,
+        vocab_size=config.vocab_size,
+        mtp_k=mtp_k,
+    )
+
+
+__all__ = [
+    "SharedMTPHead",
+    "MTPModel",
+    "MTPOutput",
+    "mtp_loss_from_hidden",
+    "mtp_training_step",
+    "create_mtp_model",
+]
+
 

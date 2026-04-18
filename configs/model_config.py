@@ -42,6 +42,10 @@ class ModelConfig:
     # 图像 h/w 是空间坐标，不建议跟着上下文延长策略一起缩放。
     rope_scaling_type: str = "linear"
     rope_scaling_factor: float = 2.0
+    # dynamic_ntk 需要知道“训练时的上下文长度”（基准长度）
+    # - 例如你计划按阶段训练：4k 起步，则 base=4096
+    # - 当实际序列长度 L_current > base 时，dynamic_ntk 会令 alpha=max(1, L_current/base)
+    rope_scaling_base_len: int = 4096
 
     # 训练参数
     load_balancing_weight: float = 0.01

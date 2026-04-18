@@ -22,6 +22,7 @@ class MROPE(nn.Module):
         *,
         rope_scaling_type: str = "none",
         rope_scaling_factor: float = 1.0,
+        rope_scaling_base_len: int = 4096,
     ):
         super().__init__()
         self.head_dim = head_dim
@@ -47,17 +48,45 @@ class MROPE(nn.Module):
 
         self.mrope_section = tuple(int(x) for x in mrope_section)
 
-        inv_freq = 1.0 / (theta ** (torch.arange(0, self.half_dim, dtype=torch.float32) / self.half_dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.theta_base = float(theta)
+        inv_freq = 1.0 / (self.theta_base ** (torch.arange(0, self.half_dim, dtype=torch.float32) / self.half_dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)  # base inv_freq（不缩放）
 
         # RoPE scaling（长上下文策略）
         self.rope_scaling_type = str(rope_scaling_type or "none")
         self.rope_scaling_factor = float(rope_scaling_factor or 1.0)
+        self.rope_scaling_base_len = int(rope_scaling_base_len or 4096)
 
     def _rotate_half(self, x):
         x1 = x[..., : x.shape[-1] // 2]
         x2 = x[..., x.shape[-1] // 2 :]
         return torch.cat([-x2, x1], dim=-1)
+
+    def _dynamic_ntk_inv_freq_t(self, *, device: torch.device, dtype: torch.dtype, seq_len: int) -> torch.Tensor:
+        """
+        dynamic NTK（只用于 t 轴）：
+        - 根据当前序列长度 seq_len 与训练基准长度 base_len 动态计算 alpha
+        - 使用 NTK-aware 的 base scaling：theta' = theta * alpha^(d/(d-2))
+          （常见近似写法来自 NTK-aware / dynamic NTK 讨论）
+        - 然后用 theta' 重新生成 inv_freq，并切出 t 轴对应的 nt 段
+        """
+        base_len = max(1, int(self.rope_scaling_base_len))
+        alpha = max(1.0, float(seq_len) / float(base_len))
+
+        # d 用 head_dim（RoPE 的旋转维度口径通常按 head_dim）
+        d = float(self.head_dim)
+        if d <= 2:
+            power = 1.0
+        else:
+            power = d / (d - 2.0)
+
+        theta_eff = self.theta_base * (alpha ** power)
+
+        # 重新生成 inv_freq_eff（全 half_dim），再切出 t 段
+        ar = torch.arange(0, self.half_dim, device=device, dtype=torch.float32)
+        inv_freq_eff = 1.0 / (theta_eff ** (ar / float(self.half_dim)))  # [half_dim]
+        nt, _, _ = self.mrope_section
+        return inv_freq_eff[:nt].to(device=device, dtype=dtype)
 
     def forward(self, q, k, positions_3d):
         """
@@ -73,21 +102,34 @@ class MROPE(nn.Module):
         # -------------------------
         # RoPE scaling：只对 t 轴做缩放（更符合多模态 3D RoPE 的语义）
         # -------------------------
+        nt, nh, nw = self.mrope_section
+
+        # 默认 inv_freq（不缩放）
+        inv_t = self.inv_freq[:nt]
+        inv_h = self.inv_freq[nt:nt + nh]
+        inv_w = self.inv_freq[nt + nh:nt + nh + nw]
+
         if self.rope_scaling_type == "linear":
             if self.rope_scaling_factor and self.rope_scaling_factor != 1.0:
                 pos_t = pos_t / self.rope_scaling_factor
         elif self.rope_scaling_type in ("none", "", None):
             pass
-        elif self.rope_scaling_type in ("ntk", "dynamic_ntk"):
-            # 预留：后续实现（动态 NTK 通常需要结合实际上下文长度）
-            raise NotImplementedError(f"rope_scaling_type={self.rope_scaling_type} not implemented yet")
+        elif self.rope_scaling_type == "ntk":
+            # 固定 NTK：用 rope_scaling_factor 作为 alpha（目标/训练 的比例）
+            # theta' = theta * alpha^(d/(d-2))
+            alpha = float(self.rope_scaling_factor)
+            d = float(self.head_dim)
+            power = d / (d - 2.0) if d > 2 else 1.0
+            theta_eff = self.theta_base * (alpha ** power)
+            ar = torch.arange(0, self.half_dim, device=device, dtype=torch.float32)
+            inv_freq_eff = 1.0 / (theta_eff ** (ar / float(self.half_dim)))
+            inv_t = inv_freq_eff[:nt].to(device=device, dtype=inv_t.dtype)
+        elif self.rope_scaling_type == "dynamic_ntk":
+            # 动态 NTK：alpha 根据当前 seq_len 动态计算
+            seq_len = int(pos_t.max().item()) + 1 if pos_t.numel() else 0
+            inv_t = self._dynamic_ntk_inv_freq_t(device=device, dtype=inv_t.dtype, seq_len=seq_len)
         else:
             raise ValueError(f"Unknown rope_scaling_type: {self.rope_scaling_type}")
-
-        nt, nh, nw = self.mrope_section
-        inv_t = self.inv_freq[:nt]
-        inv_h = self.inv_freq[nt:nt + nh]
-        inv_w = self.inv_freq[nt + nh:nt + nh + nw]
 
         ang_t = torch.einsum("bt,d->btd", pos_t, inv_t)
         ang_h = torch.einsum("bt,d->btd", pos_h, inv_h)
@@ -127,6 +169,7 @@ class GatedDeltaNet(nn.Module):
             self.head_dim,
             rope_scaling_type=getattr(config, "rope_scaling_type", "none"),
             rope_scaling_factor=getattr(config, "rope_scaling_factor", 1.0),
+            rope_scaling_base_len=getattr(config, "rope_scaling_base_len", 4096),
         )
 
     def forward(self, x, positions, past_state=None, use_cache=False):
@@ -238,6 +281,7 @@ class StandardAttention(nn.Module):
             self.head_dim,
             rope_scaling_type=getattr(config, "rope_scaling_type", "none"),
             rope_scaling_factor=getattr(config, "rope_scaling_factor", 1.0),
+            rope_scaling_base_len=getattr(config, "rope_scaling_base_len", 4096),
         )
 
     def forward(self, x, positions, mask=None):

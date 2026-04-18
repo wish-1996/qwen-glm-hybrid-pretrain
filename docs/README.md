@@ -7,8 +7,8 @@
 3. [03 并行与通信：DP/TP/PP/EP 与 all-to-all](./03_parallelism_and_communication.md)
 4. [04 训练稳定性与内存：BF16、重计算、梯度裁剪、ZeRO](./04_stability_and_memory.md)
 5. [05 多模态序列对齐（Step 1）](./05_multimodal_sequence_alignment.md)
-6. [06 数据管线：格式、混合采样、packing 与 mask](./05_data_pipeline.md)
-7. [07 Checkpoint / 日志 / 评测](./06_checkpoint_logging_eval.md)
+6. [06 数据管线：格式、混合采样、packing 与 mask](./06_data_pipeline.md)
+7. [07 Checkpoint / 日志 / 评测](./07_checkpoint_logging_eval.md)
 8. [08 注意力实现与 3D RoPE（M-RoPE）](./08_attention_and_mrope.md)
 
 ## Tools（可直接运行的工程脚本）

@@ -176,7 +176,24 @@ def train(args):
     # 初始化模型
     if _is_rank0():
         print("Initializing model...")
-    config = ModelConfig()
+    # 允许通过环境变量切换配置（避免改代码）：
+    # - MODEL_CONFIG=local  -> configs/model_config_local.py:LocalModelConfig
+    # - MODEL_CONFIG=prod7b -> configs/model_config_prod_7b.py:Prod7BModelConfig
+    model_cfg = os.environ.get("MODEL_CONFIG", "").strip().lower()
+    if model_cfg == "local":
+        from configs.model_config_local import LocalModelConfig
+        config = LocalModelConfig()
+        if _is_rank0():
+            print("[config] Using LocalModelConfig (for local debug)")
+    elif model_cfg in ("prod7b", "prod_7b", "7b"):
+        from configs.model_config_prod_7b import Prod7BModelConfig
+        config = Prod7BModelConfig()
+        if _is_rank0():
+            print("[config] Using Prod7BModelConfig (7B/0.6B target, per-layer MoE)")
+    else:
+        config = ModelConfig()
+        if _is_rank0():
+            print("[config] Using default ModelConfig")
     model = HybridMMMoEModel(config, use_multimodal=True)
     model.to(device)
     if _is_rank0():

@@ -15,4 +15,11 @@
 ## Tools（可直接运行的工程脚本）
 
 - 参数量估算（用于对齐 7B total / 0.6B active）：`python tools/param_count.py --help`
+- 参数量估算（用于对齐 7B total / 0.6B active）：`python tools/param_count.py --help`
 - Speculative Decoding demo：`python tools/run_spec_decode_demo.py --help`
+- 显存占用分析（按你们真实实现口径估算）：`python tools/mem_profile.py --help`
+
+## 配置预设（本地/生产）
+
+- 本地调试小模型：`configs/model_config_local.py`（目标：4060-8G 也能跑通训练链路）
+- 生产级 7B 目标：`configs/model_config_prod_7b.py`（按当前 per-layer MoE 实现口径对齐 7B/0.6B）

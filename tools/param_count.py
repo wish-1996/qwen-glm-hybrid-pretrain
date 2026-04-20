@@ -22,7 +22,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import torch
+# 不依赖 torch：该脚本只做理论估算，便于在纯 CPU/轻环境运行
 
 
 @dataclass
@@ -36,6 +36,7 @@ class ParamCountResult:
     moe_params_per_expert: int
     total_moe_params: int
     gate_params: int
+    moe_params_per_layer: int
 
 
 def calculate_theoretical_parameters(
@@ -77,10 +78,16 @@ def calculate_theoretical_parameters(
     attention_params_per_layer = q_params_per_layer + k_params_per_layer + v_params_per_layer + o_params_per_layer
     total_attention_params = attention_params_per_layer * num_layers
 
-    moe_params_per_expert = 2 * hidden_size * intermediate_size
-    total_moe_params = moe_params_per_expert * num_experts
+    # MoE 参数（与当前仓库实现对齐）
+    # - experts 是 SwiGLU：gate_proj/up_proj/down_proj -> 3 * H * FF
+    # - per-layer experts：每一层都有一套 experts（不是跨层共享）
+    # - shared expert：每层额外 1 个 shared expert（model/moe.py）
+    moe_params_per_expert = 3 * hidden_size * intermediate_size
+    moe_params_per_layer = moe_params_per_expert * (num_experts + 1)  # sparse experts + shared expert
+    total_moe_params = moe_params_per_layer * num_layers
 
-    gate_params = hidden_size * num_experts
+    # gate（每层一个 gate: H -> num_experts）
+    gate_params = hidden_size * num_experts * num_layers
 
     total_params = (
         embedding_params
@@ -90,9 +97,15 @@ def calculate_theoretical_parameters(
         + gate_params
     )
 
+    # active params（每 token 参与计算的“块内权重”口径）：
+    # - Attention：每层都参与，因此用 total_attention_params
+    # - MoE：每层只激活 top_k 个 expert + 1 个 shared expert
+    # - Gate：每层都会算 routing，因此也计入 active
+    # 注意：这里不把 Embedding/Output 计入 active（常见报告口径），否则 active 会被 vocab 维度显著抬高。
     active_params = (
         total_attention_params
-        + (moe_params_per_expert * top_k)
+        + (moe_params_per_expert * (top_k + 1) * num_layers)
+        + gate_params
     )
 
     return ParamCountResult(
@@ -105,6 +118,7 @@ def calculate_theoretical_parameters(
         moe_params_per_expert=moe_params_per_expert,
         total_moe_params=total_moe_params,
         gate_params=gate_params,
+        moe_params_per_layer=moe_params_per_layer,
     )
 
 
@@ -112,6 +126,11 @@ def print_param_report(
     result: ParamCountResult,
     target_total: Optional[float] = None,
     target_active: Optional[float] = None,
+    *,
+    num_layers: Optional[int] = None,
+    num_experts: Optional[int] = None,
+    top_k: Optional[int] = None,
+    intermediate_size: Optional[int] = None,
 ) -> None:
     """打印参数量报告"""
     print("\n" + "=" * 60)
@@ -139,13 +158,23 @@ def print_param_report(
     print(f"  Output 层:            {result.output_params / 1e9:.4f} B")
     print(f"  单层 Attention:       {result.attention_params_per_layer / 1e6:.2f} M")
     print(f"  总 Attention:         {result.total_attention_params / 1e9:.4f} B")
-    print(f"  单个专家 FFN:         {result.moe_params_per_expert / 1e6:.2f} M")
-    print(f"  总 MoE 参数量:        {result.total_moe_params / 1e9:.4f} B ({192} experts)")
-    print(f"  Gate 参数量:         {result.gate_params / 1e6:.2f} M")
+    print(f"  单个专家 FFN(SwiGLU): {result.moe_params_per_expert / 1e6:.2f} M")
+    if num_experts is not None:
+        print(f"  单层 MoE 参数量:      {result.moe_params_per_layer / 1e9:.4f} B (experts={num_experts} + shared=1)")
+    else:
+        print(f"  单层 MoE 参数量:      {result.moe_params_per_layer / 1e9:.4f} B (experts=E + shared=1)")
+    if num_layers is not None:
+        print(f"  总 MoE 参数量:        {result.total_moe_params / 1e9:.4f} B (layers={num_layers})")
+    else:
+        print(f"  总 MoE 参数量:        {result.total_moe_params / 1e9:.4f} B")
+    print(f"  Gate 参数量(总):      {result.gate_params / 1e9:.4f} B")
 
     print(f"\n[比例分析]")
     print(f"  MoE 占比 (总):       {result.total_moe_params / result.total_params * 100:.2f}%")
-    print(f"  MoE 占比 (激活):     {result.moe_params_per_expert * 4 / result.active_params * 100:.2f}%")
+    if top_k is not None and num_layers is not None:
+        print(f"  MoE 占比 (激活):     {result.moe_params_per_expert * (top_k + 1) * num_layers / result.active_params * 100:.2f}%")
+    else:
+        print(f"  MoE 占比 (激活):     (top_k/layers not provided)")
     print(f"  Attention 占比:      {result.total_attention_params / result.total_params * 100:.2f}%")
 
 
@@ -153,6 +182,10 @@ def suggest_adjustments(
     result: ParamCountResult,
     target_total: float,
     target_active: float,
+    *,
+    num_experts: int,
+    top_k: int,
+    intermediate_size: int,
 ) -> None:
     """给出参数调整建议"""
     print(f"\n[参数调整建议]")
@@ -160,24 +193,24 @@ def suggest_adjustments(
     if result.total_params < target_total:
         gap = target_total - result.total_params
         print(f"  总参数量偏低 {gap / 1e9:.2f}B，建议:")
-        print(f"    - 增加 num_experts (当前 {192})")
-        print(f"    - 或增加 intermediate_size (当前 5734)")
+        print(f"    - 增加 num_experts (当前 {num_experts})")
+        print(f"    - 或增加 intermediate_size (当前 {intermediate_size})")
     elif result.total_params > target_total:
         gap = result.total_params - target_total
         print(f"  总参数量偏高 {gap / 1e9:.2f}B，建议:")
-        print(f"    - 减少 num_experts (当前 {192})")
-        print(f"    - 或减少 intermediate_size (当前 5734)")
+        print(f"    - 减少 num_experts (当前 {num_experts})")
+        print(f"    - 或减少 intermediate_size (当前 {intermediate_size})")
 
     if result.active_params < target_active:
         gap = target_active - result.active_params
         print(f"\n  激活参数量偏低 {gap / 1e9:.2f}B，建议:")
-        print(f"    - 增加 top_k (当前 4)")
-        print(f"    - 或增加 intermediate_size (当前 5734)")
+        print(f"    - 增加 top_k (当前 {top_k})")
+        print(f"    - 或增加 intermediate_size (当前 {intermediate_size})")
     elif result.active_params > target_active:
         gap = result.active_params - target_active
         print(f"\n  激活参数量偏高 {gap / 1e9:.2f}B，建议:")
-        print(f"    - 减少 top_k (当前 4)")
-        print(f"    - 或减少 intermediate_size (当前 5734)")
+        print(f"    - 减少 top_k (当前 {top_k})")
+        print(f"    - 或减少 intermediate_size (当前 {intermediate_size})")
 
 
 def main():
@@ -246,8 +279,23 @@ def main():
         vocab_size=args.vocab_size,
     )
 
-    print_param_report(result, args.target_total, args.target_active)
-    suggest_adjustments(result, args.target_total, args.target_active)
+    print_param_report(
+        result,
+        args.target_total,
+        args.target_active,
+        num_layers=args.num_layers,
+        num_experts=args.num_experts,
+        top_k=args.top_k,
+        intermediate_size=args.intermediate_size,
+    )
+    suggest_adjustments(
+        result,
+        args.target_total,
+        args.target_active,
+        num_experts=args.num_experts,
+        top_k=args.top_k,
+        intermediate_size=args.intermediate_size,
+    )
 
     print("\n" + "=" * 60)
 

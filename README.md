@@ -55,6 +55,18 @@ bash scripts/smoke_1node_1gpu.sh
 
 ---
 
+## Tools（工程脚本）
+
+- 参数量估算（按当前 per-layer MoE 实现口径）：`python tools/param_count.py --help`
+- 显存占用分析（单卡/多卡 DDP）：`python tools/mem_profile.py --help`
+
+## 配置预设（本地/生产）
+
+- 本地调试：`configs/model_config_local.py`（目标：4060-8G 也能跑通训练链路）
+- 生产级 7B：`configs/model_config_prod_7b.py`（按当前 per-layer MoE 实现口径对齐 7B/0.6B）
+
+---
+
 ## Roadmap（建议的下一步）
 
 更完整的"生产级落地计划 + 勾选清单"请直接看：

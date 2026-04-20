@@ -3,13 +3,17 @@
 显存占用分析工具
 
 功能：
-- 单卡显存使用情况分析
-- 多卡 DDP 显存使用情况分析
+- 基于配置的模型显存估算
+- 单卡/多卡显存使用情况分析
 - 模型不同组件的显存占用统计
-- 前向/反向传播显存变化分析
 
 使用方法：
-python tools/mem_profile.py --help
+python tools/mem_profile.py [--batch_size BATCH_SIZE] [--max_length MAX_LENGTH] [--image_size IMAGE_SIZE] [--output_json OUTPUT_JSON]
+
+示例：
+python tools/mem_profile.py
+python tools/mem_profile.py --batch_size 2 --max_length 1024 --image_size 448
+python tools/mem_profile.py --batch_size 4 --max_length 2048 --output_json results.json
 """
 
 import argparse
@@ -19,29 +23,20 @@ import os
 from datetime import datetime
 
 import torch
-import torch.nn as nn
 
-# 添加项目根目录到 Python 路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from model.hybrid_moe_model import HybridMMMoEModel
 from configs.model_config import ModelConfig
-from data.multimodal_data_loader import get_data_loader
-from data.multimodal_sequence_alignment import build_aligned_masks_and_labels
-from transformers import AutoTokenizer
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="显存占用分析工具")
-    parser.add_argument("--tokenizer_path", type=str, default="./tokenizers/qwen3-0.6b", help="分词器路径")
-    parser.add_argument("--data_dir", type=str, default="./data", help="数据目录")
     parser.add_argument("--batch_size", type=int, default=1, help="批次大小")
     parser.add_argument("--max_length", type=int, default=512, help="最大序列长度")
     parser.add_argument("--image_size", type=int, default=224, help="图像大小")
-    parser.add_argument("--distributed", action="store_true", help="是否使用分布式模式")
-    parser.add_argument("--profile_forward", action="store_true", help="分析前向传播显存变化")
-    parser.add_argument("--profile_backward", action="store_true", help="分析反向传播显存变化")
     parser.add_argument("--output_json", type=str, default="", help="输出 JSON 结果文件")
+    parser.add_argument("--config_preset", type=str, default="default", choices=["default", "local", "prod7b"],
+                        help="使用哪套模型配置：default(仓库默认) / local(本地小模型) / prod7b(7B 目标配置)")
     return parser.parse_args()
 
 
@@ -49,11 +44,11 @@ def get_gpu_memory():
     """获取所有 GPU 的内存使用情况"""
     if not torch.cuda.is_available():
         return {}
-    
+
     memory_info = {}
     for i in range(torch.cuda.device_count()):
-        mem = torch.cuda.memory_allocated(i) / 1024**3  # GB
-        max_mem = torch.cuda.max_memory_allocated(i) / 1024**3  # GB
+        mem = torch.cuda.memory_allocated(i) / 1024**3
+        max_mem = torch.cuda.max_memory_allocated(i) / 1024**3
         memory_info[i] = {
             "allocated": mem,
             "max_allocated": max_mem,
@@ -73,206 +68,127 @@ def print_memory_info(info, prefix=""):
 
 
 def profile_model_memory(args):
-    """分析模型显存占用"""
-    print("=== 显存占用分析 ===")
+    """基于配置估算模型显存占用"""
+    print("=== 显存占用估算 ===")
     print(f"时间: {datetime.utcnow().isoformat()}")
     print(f"参数: {args}")
-    
-    # 初始化统计
+
     stats = {
         "timestamp": datetime.utcnow().isoformat(),
         "args": vars(args),
         "memory": {},
         "model_info": {}
     }
-    
-    # 初始内存
+
     torch.cuda.empty_cache()
     initial_mem = get_gpu_memory()
     stats["memory"]["initial"] = initial_mem
     print("\n初始内存:")
     print_memory_info(initial_mem)
-    
-    # 加载分词器
-    print("\n加载分词器...")
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
-    
-    # 加载数据
-    print("加载数据...")
-    train_loader = get_data_loader(
-        data_dir=args.data_dir,
-        tokenizer=tokenizer,
-        batch_size=args.batch_size,
-        max_length=args.max_length,
-        image_size=args.image_size,
-        num_workers=0,
-        pin_memory=False,
-        distributed=args.distributed,
-        rank=0,
-        world_size=1 if not args.distributed else 2,
-        seed=42,
-    )
-    
-    # 获取一个 batch
-    batch = next(iter(train_loader))
-    input_ids = batch['input_ids']
-    attention_mask = batch['attention_mask']
-    pixel_values = batch['pixel_values']
-    
-    print(f"\nBatch 信息:")
-    print(f"  input_ids: {input_ids.shape}, dtype={input_ids.dtype}")
-    print(f"  attention_mask: {attention_mask.shape}, dtype={attention_mask.dtype}")
-    print(f"  pixel_values: {pixel_values.shape}, dtype={pixel_values.dtype}")
-    
-    # 构建对齐后的张量
-    aligned = build_aligned_masks_and_labels(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        image_size=args.image_size,
-        patch_size=16,
-        pad_ignore_index=-100,
-        image_pad_token_id=None,
-        build_positions=True,
-    )
-    input_ids_total = aligned.input_ids_total
-    attention_mask_total = aligned.attention_mask_total
-    labels_total = aligned.labels_total
-    positions_total = aligned.positions_total
-    
-    print(f"\n对齐后张量:")
-    print(f"  input_ids_total: {input_ids_total.shape}")
-    print(f"  attention_mask_total: {attention_mask_total.shape}")
-    print(f"  labels_total: {labels_total.shape}")
-    print(f"  positions_total: {positions_total.shape}")
-    
-    # 初始化模型
-    print("\n初始化模型...")
-    config = ModelConfig()
-    model = HybridMMMoEModel(config, use_multimodal=True)
-    
-    # 统计模型参数量
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
+
+    if args.config_preset == "local":
+        from configs.model_config_local import LocalModelConfig
+        config = LocalModelConfig()
+        print("[config] Using LocalModelConfig")
+    elif args.config_preset == "prod7b":
+        from configs.model_config_prod_7b import Prod7BModelConfig
+        config = Prod7BModelConfig()
+        print("[config] Using Prod7BModelConfig")
+    else:
+        config = ModelConfig()
+        print("[config] Using default ModelConfig")
+
+    embed_params = config.vocab_size * config.hidden_size
+    layer_params = 0
+    attn_params = config.hidden_size * config.hidden_size * 3
+    # MoE 参数（与当前仓库实现对齐）
+    # - experts 是 SwiGLU：gate_proj/up_proj/down_proj -> 3 * H * FF
+    # - per-layer experts：每一层都有一套 experts（不是跨层共享）
+    # - shared expert：每层额外 1 个 shared expert
+    moe_params_per_expert = 3 * config.hidden_size * config.intermediate_size
+    moe_params_per_layer = moe_params_per_expert * (config.num_experts + 1)  # sparse experts + shared expert
+    layer_params = attn_params + moe_params_per_layer
+    layers_params = layer_params * config.num_layers
+    lm_head_params = config.hidden_size * config.vocab_size
+
+    vision_params = 0
+    vision_params += 3 * config.hidden_size * (config.patch_size ** 2)
+    num_patches = (config.image_size // config.patch_size) ** 2
+    vision_params += num_patches * config.hidden_size
+    for _ in range(4):
+        vision_params += config.hidden_size * config.hidden_size * 3
+        vision_params += config.hidden_size * config.intermediate_size * 2
+
+    total_params = embed_params + layers_params + lm_head_params + vision_params
+    trainable_params = total_params
+
     stats["model_info"]["total_params"] = total_params
     stats["model_info"]["trainable_params"] = trainable_params
-    
-    print(f"模型参数量:")
+
+    print(f"\n模型参数量:")
     print(f"  总参数: {total_params / 1e9:.2f}B")
     print(f"  可训练参数: {trainable_params / 1e9:.2f}B")
-    
-    # 移至 GPU
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    input_ids_total = input_ids_total.to(device)
-    attention_mask_total = attention_mask_total.to(device)
-    labels_total = labels_total.to(device)
-    positions_total = positions_total.to(device)
-    pixel_values = pixel_values.to(device)
-    
-    # 模型加载后的内存
-    after_model_mem = get_gpu_memory()
-    stats["memory"]["after_model_loaded"] = after_model_mem
-    print("\n模型加载后内存:")
-    print_memory_info(after_model_mem)
-    
-    # 前向传播分析
-    if args.profile_forward:
-        print("\n=== 前向传播分析 ===")
-        torch.cuda.empty_cache()
-        pre_forward_mem = get_gpu_memory()
-        
-        with torch.no_grad():
-            logits, past_states, aux_loss = model(
-                input_ids=input_ids_total,
-                positions=positions_total,
-                pixel_values=pixel_values,
-                attention_mask=attention_mask_total,
-                use_cache=False,
-                output_hidden_states=False,
-            )
-        
-        post_forward_mem = get_gpu_memory()
-        stats["memory"]["pre_forward"] = pre_forward_mem
-        stats["memory"]["post_forward"] = post_forward_mem
-        
-        print("前向传播前内存:")
-        print_memory_info(pre_forward_mem)
-        print("前向传播后内存:")
-        print_memory_info(post_forward_mem)
-        
-        # 计算前向传播内存增加
-        for gpu_id in pre_forward_mem:
-            delta = post_forward_mem[gpu_id]["allocated"] - pre_forward_mem[gpu_id]["allocated"]
-            print(f"GPU {gpu_id} 前向传播内存增加: {delta:.2f} GB")
-    
-    # 反向传播分析
-    if args.profile_backward:
-        print("\n=== 反向传播分析 ===")
-        torch.cuda.empty_cache()
-        
-        # 前向传播
-        logits, past_states, aux_loss = model(
-            input_ids=input_ids_total,
-            positions=positions_total,
-            pixel_values=pixel_values,
-            attention_mask=attention_mask_total,
-            use_cache=False,
-            output_hidden_states=False,
-        )
-        
-        # 计算损失
-        loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
-        shift_logits = logits[:, :-1, :].contiguous()
-        shift_labels = labels_total[:, 1:].contiguous()
-        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-        
-        pre_backward_mem = get_gpu_memory()
-        
-        # 反向传播
-        loss.backward()
-        
-        post_backward_mem = get_gpu_memory()
-        stats["memory"]["pre_backward"] = pre_backward_mem
-        stats["memory"]["post_backward"] = post_backward_mem
-        
-        print("反向传播前内存:")
-        print_memory_info(pre_backward_mem)
-        print("反向传播后内存:")
-        print_memory_info(post_backward_mem)
-        
-        # 计算反向传播内存增加
-        for gpu_id in pre_backward_mem:
-            delta = post_backward_mem[gpu_id]["allocated"] - pre_backward_mem[gpu_id]["allocated"]
-            print(f"GPU {gpu_id} 反向传播内存增加: {delta:.2f} GB")
-    
-    # 清理
-    del model
-    del input_ids_total, attention_mask_total, labels_total, positions_total, pixel_values
-    torch.cuda.empty_cache()
-    
-    final_mem = get_gpu_memory()
-    stats["memory"]["final"] = final_mem
-    print("\n清理后内存:")
-    print_memory_info(final_mem)
-    
-    # 输出 JSON
+
+    param_mem_gb = total_params * 2 / (1024**3)
+    batch_size = args.batch_size
+    text_seq_len = args.max_length
+    num_patches = (args.image_size // config.patch_size) ** 2
+    seq_len = text_seq_len + num_patches
+    hidden_size = config.hidden_size
+    vocab_size = config.vocab_size
+
+    input_embed_mem_gb = batch_size * seq_len * hidden_size * 2 / (1024**3)
+    output_logits_mem_gb = batch_size * seq_len * vocab_size * 2 / (1024**3)
+    activation_mem_gb = batch_size * seq_len * hidden_size * 4 / (1024**3)
+    backward_mem_gb = (input_embed_mem_gb + output_logits_mem_gb + activation_mem_gb) * 2.5
+
+    total_estimated_mem_gb = param_mem_gb + input_embed_mem_gb + output_logits_mem_gb + activation_mem_gb + backward_mem_gb
+
+    print(f"\n估算显存占用:")
+    print(f"  模型参数: {param_mem_gb:.2f} GB")
+    print(f"  输入嵌入: {input_embed_mem_gb:.2f} GB")
+    print(f"  输出 logits: {output_logits_mem_gb:.2f} GB")
+    print(f"  中间激活: {activation_mem_gb:.2f} GB")
+    print(f"  反向传播: {backward_mem_gb:.2f} GB")
+    print(f"  总估算: {total_estimated_mem_gb:.2f} GB")
+
+    stats["model_info"]["estimated_memory"] = {
+        "param_mem_gb": param_mem_gb,
+        "input_embed_mem_gb": input_embed_mem_gb,
+        "output_logits_mem_gb": output_logits_mem_gb,
+        "activation_mem_gb": activation_mem_gb,
+        "backward_mem_gb": backward_mem_gb,
+        "total_estimated_mem_gb": total_estimated_mem_gb
+    }
+
+    for gpu_id, mem in initial_mem.items():
+        gpu_total = mem["total"]
+        if total_estimated_mem_gb > gpu_total * 0.9:
+            print(f"\n警告: GPU {gpu_id} 可能会 OOM！")
+            print(f"  GPU 总内存: {gpu_total:.2f} GB")
+            print(f"  估算需要: {total_estimated_mem_gb:.2f} GB")
+        else:
+            print(f"\nGPU {gpu_id} 内存充足")
+            print(f"  GPU 总内存: {gpu_total:.2f} GB")
+            print(f"  估算需要: {total_estimated_mem_gb:.2f} GB")
+            print(f"  剩余空间: {gpu_total - total_estimated_mem_gb:.2f} GB")
+
     if args.output_json:
         os.makedirs(os.path.dirname(args.output_json), exist_ok=True)
         with open(args.output_json, "w", encoding="utf-8") as f:
             json.dump(stats, f, ensure_ascii=False, indent=2)
         print(f"\n分析结果已保存到: {args.output_json}")
-    
+
     return stats
 
 
 def main():
     args = parse_args()
-    
+
     if not torch.cuda.is_available():
         print("错误: 没有可用的 GPU，无法进行显存分析")
         sys.exit(1)
-    
+
     try:
         profile_model_memory(args)
     except Exception as e:

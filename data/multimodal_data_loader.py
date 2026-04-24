@@ -264,6 +264,17 @@ class MultimodalDataset(Dataset):
             }
 
 
+def get_seed_worker_fn(seed: int, rank: int):
+    """返回一个种子初始化函数，用于 DataLoader 的 worker_init_fn"""
+    def _seed_worker(worker_id: int):
+        import random
+        import numpy as np
+        worker_seed = (seed + rank * 10_000 + worker_id) % 2**32
+        random.seed(worker_seed)
+        np.random.seed(worker_seed)
+    return _seed_worker
+
+
 def build_dataloader(
     tokenizer,
     cfg: MultimodalDataConfig,
@@ -290,10 +301,7 @@ def build_dataloader(
         )
         shuffle = False
 
-    def _seed_worker(worker_id: int):
-        worker_seed = (cfg.seed + rank * 10_000 + worker_id) % 2**32
-        random.seed(worker_seed)
-        np.random.seed(worker_seed)
+    seed_worker_fn = get_seed_worker_fn(cfg.seed, rank)
 
     return DataLoader(
         dataset,
@@ -303,7 +311,7 @@ def build_dataloader(
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=drop_last,
-        worker_init_fn=_seed_worker if num_workers and num_workers > 0 else None,
+        worker_init_fn=seed_worker_fn if num_workers and num_workers > 0 else None,
     )
 
 

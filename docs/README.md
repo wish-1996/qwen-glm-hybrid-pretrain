@@ -15,9 +15,9 @@
 ## Tools（可直接运行的工程脚本）
 
 - 参数量估算（用于对齐 7B total / 0.6B active）：`python tools/param_count.py --help`
-- 参数量估算（用于对齐 7B total / 0.6B active）：`python tools/param_count.py --help`
 - Speculative Decoding demo：`python tools/run_spec_decode_demo.py --help`
 - 显存占用分析（按你们真实实现口径估算）：`python tools/mem_profile.py --help`
+- 训练计划估算（数据量/avg tokens/steps/时间）：`python tools/estimate_training_plan.py --help`
 
 ## 配置预设（本地/生产）
 

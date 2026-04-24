@@ -29,15 +29,15 @@ class MROPE(nn.Module):
         self.half_dim = head_dim // 2
         assert head_dim % 2 == 0, "head_dim must be even"
         
-        # 每个 "旋转对" 占用 2 维，所以 mrope_section 的总和应该是 half_dim // 2
-        required_sum = self.half_dim // 2
+        # mrope_section 的总和应该是 half_dim
+        required_sum = self.half_dim
         
         # 根据 head_dim 自动计算 mrope_section
         if mrope_section is None:
-            # 对于 head_dim=128，half_dim=64，required_sum=32
-            # 分配为 (11, 11, 10) 总和为 32
+            # 对于 head_dim=128，half_dim=64，required_sum=64
+            # 分配为 (22, 22, 20) 总和为 64
             if head_dim == 128:
-                mrope_section = (11, 11, 10)
+                mrope_section = (22, 22, 20)
             # 对于其他 head_dim 值，可以根据需要调整
             else:
                 # 简单分配：将 required_sum 分成三部分
@@ -270,6 +270,10 @@ class StandardAttention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_kv_heads
         self.head_dim = config.hidden_size // self.num_heads
+        self.attention_backend = getattr(config, "attention_backend", "torch")
+        self.attention_causal = bool(getattr(config, "attention_causal", True))
+        self.use_flash_attn = bool(getattr(config, "use_flash_attn", False))
+        self.flash_dropout_p = float(getattr(config, "flash_attn_dropout", 0.0))
         
         self.q_proj = nn.Linear(config.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
@@ -284,7 +288,7 @@ class StandardAttention(nn.Module):
             rope_scaling_base_len=getattr(config, "rope_scaling_base_len", 4096),
         )
 
-    def forward(self, x, positions, mask=None):
+    def forward(self, x, positions, attention_mask: torch.Tensor | None = None):
         # x: 输入 hidden states，形状 [B, N, H]，示例：[2, 228, 2048]
         # positions: 3D 位置编码，形状 [B, N, 3]，示例：[2, 228, 3]
         B, N, _ = x.shape
@@ -299,7 +303,35 @@ class StandardAttention(nn.Module):
         # M-RoPE：应用 3D 位置编码旋转
         # 输出形状不变
         q, k = self.mrope(q, k, positions)
-        
+
+        # -------------------------
+        # P0-2：Flash Attention 路径（优先）
+        # - 仅支持 causal（自回归）+ 不带显式 mask（后续做 varlen/packing 再上 varlen 接口）
+        # - GQA/MQA：flash-attn 允许 K/V head 数 < Q head 数（避免 repeat_interleave 的显存/带宽浪费）
+        # -------------------------
+        if self.use_flash_attn and attention_mask is None:
+            try:
+                from flash_attn import flash_attn_func  # type: ignore
+            except Exception:
+                flash_attn_func = None
+
+            if flash_attn_func is not None:
+                # flash-attn 期望 shape: [B, T, H, Dh]
+                q_bt = q.transpose(1, 2).contiguous()
+                k_bt = k.transpose(1, 2).contiguous()
+                v_bt = v.transpose(1, 2).contiguous()
+
+                out_bt = flash_attn_func(
+                    q_bt,
+                    k_bt,
+                    v_bt,
+                    dropout_p=self.flash_dropout_p,
+                    causal=True,
+                )  # [B, T, Hq, Dh]
+
+                out = out_bt.reshape(B, N, -1)
+                return self.out_proj(out)
+
         # GQA 扩展 K/V 以匹配 Q
         # groups = num_heads / num_kv_heads = 16/4 = 4
         # 扩展后：k, v 从 [B, 4, N, 128] -> [B, 16, N, 128]
@@ -307,11 +339,50 @@ class StandardAttention(nn.Module):
         k = k.repeat_interleave(groups, dim=1)  # [B, num_heads, N, head_dim]
         v = v.repeat_interleave(groups, dim=1)  # [B, num_heads, N, head_dim]
         
-        # Softmax Attention
-        # scores: [B, num_heads, N, N]，示例：[2, 16, 228, 228]
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        if mask is not None:
-            scores = scores.masked_fill(mask == 0, float('-inf'))
+        # ------------------------------------------
+        # Attention backend（torch / flash），并保证 causal
+        # ------------------------------------------
+        use_flash = False
+        flash_attn_func = None
+        if (
+            self.attention_backend == "flash"
+            and q.is_cuda
+            and q.dtype in (torch.float16, torch.bfloat16)
+        ):
+            try:
+                # flash-attn 2.x
+                from flash_attn import flash_attn_func as _flash_attn_func
+                flash_attn_func = _flash_attn_func
+                use_flash = True
+            except Exception:
+                use_flash = False
+
+        # flash-attn 这里先支持“无 padding（全 1）”的情况；否则回退 torch
+        if use_flash and attention_mask is not None:
+            if not torch.all(attention_mask == 1):
+                use_flash = False
+
+        if use_flash and flash_attn_func is not None:
+            # flash_attn_func 期望 [B, N, H, D]
+            q_ = q.transpose(1, 2).contiguous()  # [B,N,H,D]
+            k_ = k.transpose(1, 2).contiguous()
+            v_ = v.transpose(1, 2).contiguous()
+            out_ = flash_attn_func(q_, k_, v_, dropout_p=0.0, causal=self.attention_causal)  # [B,N,H,D]
+            out = out_.contiguous().view(B, N, -1)
+            return self.out_proj(out)
+
+        # ---- torch fallback（支持 causal + padding mask）----
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)  # [B,H,N,N]
+
+        if self.attention_causal:
+            causal = torch.tril(torch.ones(N, N, device=scores.device, dtype=torch.bool))
+            scores = scores.masked_fill(~causal[None, None, :, :], float("-inf"))
+
+        if attention_mask is not None:
+            # attention_mask: [B,N], 1=valid, 0=pad
+            key_mask = (attention_mask[:, None, None, :] == 0)  # [B,1,1,N]
+            scores = scores.masked_fill(key_mask, float("-inf"))
+
         attn = F.softmax(scores, dim=-1)
         
         # 输出: attn @ v -> [B, num_heads, N, head_dim] -> [B, N, num_heads, head_dim] -> [B, N, H]
@@ -355,7 +426,7 @@ class Qwen35Block(nn.Module):
         # 共享专家 MoE
         self.moe = SharedExpertMoE(config)
 
-    def forward(self, x, positions, past_state=None, use_cache=False):
+    def forward(self, x, positions, attention_mask: torch.Tensor | None = None, past_state=None, use_cache=False):
         # Attention
         residual = x
         x = self.norm1(x)
@@ -363,7 +434,7 @@ class Qwen35Block(nn.Module):
             x, new_state = self.attn(x, positions, past_state=past_state, use_cache=use_cache)
             return self.moe(self.norm2(x + residual)), new_state
         else:
-            x = self.attn(x, positions)
+            x = self.attn(x, positions, attention_mask=attention_mask)
             return self.moe(self.norm2(x + residual)), None
 
 class VisionPatchEmbed(nn.Module):
@@ -602,7 +673,7 @@ class HybridMMMoEModel(nn.Module):
         aux_loss = 0.0
 
         for layer in self.layers:
-            x, state = layer(x, positions, use_cache=use_cache)
+            x, state = layer(x, positions, attention_mask=attention_mask, use_cache=use_cache)
             if state is not None:
                 past_states.append(state)
             if hasattr(layer.moe, 'aux_loss'):

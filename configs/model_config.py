@@ -29,6 +29,22 @@ class ModelConfig:
     # 注意力参数
     head_dim: int = None
 
+    # Flash Attention（P0-2）
+    # - True：优先走 flash-attn（若环境缺依赖会 fallback 到原实现）
+    # - False：强制使用原生 attention 实现
+    use_flash_attn: bool = False
+    flash_attn_dropout: float = 0.0
+
+    # -------------------------
+    # Attention backend（性能优化）
+    # -------------------------
+    # attention_backend:
+    # - "torch": 纯 PyTorch matmul + softmax（最稳，任何环境都能跑）
+    # - "flash": 尝试使用 flash-attn（若未安装或不满足条件则自动回退到 torch）
+    attention_backend: str = "torch"
+    # 是否使用 causal mask（自回归训练/推理推荐开启）
+    attention_causal: bool = True
+
     # -------------------------
     # RoPE / 长上下文扩展（先做最小可用：linear scaling）
     # -------------------------
@@ -49,6 +65,21 @@ class ModelConfig:
 
     # 训练参数
     load_balancing_weight: float = 0.01
+
+    # -------------------------
+    # MoE 后端选择（P0-1：接入 DeepSpeed-MoE）
+    # -------------------------
+    # - "native"    : 本仓库原生实现（当前为 Python 循环版本，仅用于功能验证）
+    # - "deepspeed" : 使用 DeepSpeed-MoE 做 dispatch/combine + grouped GEMM（面向生产）
+    moe_backend: str = "native"
+
+    # DeepSpeed-MoE 参数（仅当 moe_backend="deepspeed" 生效）
+    # 说明：
+    # - ep_size=1 表示不开 Expert Parallel（单机/单卡也能跑通）
+    # - 多机 EP 作为后续阶段再扩展
+    deepspeed_moe_ep_size: int = 1
+    deepspeed_moe_capacity_factor: float = 1.0
+    deepspeed_moe_min_capacity: int = 4
 
     # 多模态参数
     image_size: int = 224

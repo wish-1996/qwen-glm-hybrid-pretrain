@@ -55,6 +55,17 @@ bash scripts/smoke_1node_1gpu.sh
 
 ---
 
+## 环境配置（快速复现）
+
+推荐环境：**PyTorch 2.5.1 + Python 3.11 + CUDA 12.4**（与你截图一致）。
+
+```bash
+pip install -r requirements.txt
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+```
+
+---
+
 ## Tools（工程脚本）
 
 - 参数量估算（按当前 per-layer MoE 实现口径）：`python tools/param_count.py --help`

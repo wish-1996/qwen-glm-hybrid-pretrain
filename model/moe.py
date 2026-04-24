@@ -33,9 +33,9 @@ class SwiGLU(nn.Module):
 
 
 # ==========================================
-# Shared Expert MoE
+# Shared Expert MoE（native：功能验证版，存在 Python 循环瓶颈）
 # ==========================================
-class SharedExpertMoE(nn.Module):
+class SharedExpertMoENative(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.num_experts = config.num_experts
@@ -126,3 +126,31 @@ class SharedExpertMoE(nn.Module):
         total_out = total_out.view(B, N, D)
         
         return total_out
+
+
+# ==========================================
+# Shared Expert MoE（统一入口：按 config.moe_backend 选择实现）
+# - native：本文件的 SharedExpertMoENative（仅用于功能验证）
+# - deepspeed：model/moe_deepspeed.py::SharedExpertMoEDeepSpeed（P0-1）
+# ==========================================
+class SharedExpertMoE(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        backend = str(getattr(config, "moe_backend", "native")).lower().strip()
+
+        if backend == "deepspeed":
+            from .moe_deepspeed import SharedExpertMoEDeepSpeed
+
+            self.impl = SharedExpertMoEDeepSpeed(config)
+        elif backend in ("native", "", "none"):
+            self.impl = SharedExpertMoENative(config)
+        else:
+            raise ValueError(f"Unknown moe_backend={backend}, expected 'native' or 'deepspeed'")
+
+        # 训练脚本会读取 layer.moe.aux_loss（保持兼容）
+        self.aux_loss = torch.tensor(0.0)
+
+    def forward(self, x):
+        y = self.impl(x)
+        self.aux_loss = getattr(self.impl, "aux_loss", torch.tensor(0.0, device=y.device))
+        return y

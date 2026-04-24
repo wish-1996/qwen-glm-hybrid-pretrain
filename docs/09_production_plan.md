@@ -62,6 +62,7 @@
 - [x] rank0 专用日志文件
 - [x] 训练指标记录（loss、grad\_norm、tokens\_per\_sec）
 - [x] 时间统计（data\_time、step\_time）
+- [ ] 训练计划估算工具（数据量/avg tokens/steps/时间；与日志 tokens/s 对齐）
 
 ### 2.4 分布式训练
 
@@ -71,6 +72,30 @@
 - [x] 分布式同步（all\_reduce for tokens）
 
 ## 阶段三：性能优化
+
+## P0：必须先做（否则规模化基本不可谈）
+
+> 本节是"立即执行"的 P0 计划表：优先解决**吞吐瓶颈/可扩展性瓶颈**，让 MoE + 长序列训练具备工程可行性。
+> 你们已确认的选择：**MoE 库=DeepSpeed-MoE**，**启动方式=保持 torchrun+DDP**，**硬件=NVIDIA CUDA**。
+
+### P0 计划表（建议按顺序推进）
+
+| P0 条目 | 目标（Why） | 方案（How） | 代码改动范围（Where） | 验收标准（Done Definition） | 风险/备注 |
+|---|---|---|---|---|---|
+| P0-1：MoE 接入 DeepSpeed-MoE（替换 Python for-loop） | 去掉 `num_experts * top_k` 的 Python 循环瓶颈，为大专家数/大 batch/多机 EP 打基础 | 1) 保留现有 `SharedExpertMoE` 接口；2) 新增 `moe_backend=deepspeed` 分支，内部用 `deepspeed.moe.layer.MoE` 做 dispatch/combine + grouped GEMM；3) 共享专家（shared expert）保留为并行支路 `out = ds_moe_out + shared_expert_out` | `configs/model_config.py`（新增 MoE backend 配置）<br>`model/moe.py` / `model/moe_deepspeed.py`（新增 wrapper）<br>`model/hybrid_moe_model.py`（保持 import/调用不变或最小改动） | 1) 单卡 forward/backward 可跑通；2) DDP 8 卡 smoke 可跑通；3) MoE 部分无 Python token 循环；4) `aux_loss` 可用且曲线合理 | DeepSpeed 版本差异可能导致返回值不同（需做兼容 wrapper）；后续要做 EP/All2All 时再扩展 |
+| P0-2：StandardAttention 接入 flash-attn（并避免 repeat_interleave 扩 KV） | 降低注意力计算时间与显存，给长上下文/packing 留空间 | 使用 flash-attn（优先支持 GQA/MQA），让 K/V 不做 head 维复制；保留 fallback 到原实现 | `model/hybrid_moe_model.py::StandardAttention`（新增 flash-attn 路径） | 1) 功能对齐（数值允许轻微误差）；2) 显存下降、吞吐提升；3) 允许后续接 varlen/packing | 依赖 CUDA/flash-attn 编译；需要在 README/脚本里给安装指引 |
+| P0-3：GatedDeltaNet 训练分支去 token 级 for-loop（至少 chunk 化） | 线性注意力训练在长序列下避免 O(N) Python 循环 | 先做 chunk-wise（例如 128/256 token 一块），块内矢量化更新；后续可用 Triton/torch.compile 继续优化 | `model/hybrid_moe_model.py::GatedDeltaNet.forward`（训练分支） | 1) 去掉 `for t in range(N)`；2) 长序列（>=4k）吞吐显著改善；3) 训练 loss 正常下降 | 需要仔细处理 state 更新与数值稳定性；先以"正确+快很多"为目标 |
+
+### P0 执行节奏（建议）
+
+1. **先做 P0-1（MoE）**：这是当前最硬的性能瓶颈，且改动相对可控（模块边界清晰）。
+2. **再做 P0-2（flash-attn）**：注意力是第二大头，且 flash-attn 接入收益稳定。
+3. **最后做 P0-3（DeltaNet chunk 化）**：需要更多验证，但收益巨大。
+
+### P0 验收脚本（建议你们在本仓库补齐）
+
+- `scripts/smoke_1node_1gpu.sh`：新增 `MOE_BACKEND=deepspeed` 的 smoke case
+- `scripts/smoke_1node_8gpu.sh`（新增）：torchrun 8 卡，跑 20~50 steps，打印 tok/s 与 loss 曲线
 
 ### 3.1 显存优化
 
@@ -121,6 +146,7 @@
 - [ ] YAML / TOML 配置文件支持
 - [ ] 配置验证与合并
 - [ ] 超参数搜索支持
+- [ ] 数据集统计与版本化（rows/tokens/混合比例；用于 steps/epoch 计算的依据）
 
 ### 5.2 监控与告警
 

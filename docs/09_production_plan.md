@@ -97,6 +97,12 @@
 - `scripts/smoke_1node_1gpu.sh`：新增 `MOE_BACKEND=deepspeed` 的 smoke case
 - `scripts/smoke_1node_8gpu.sh`（新增）：torchrun 8 卡，跑 20~50 steps，打印 tok/s 与 loss 曲线
 
+约定（便于 CI/回归）：
+- smoke 默认使用 `--max_steps` 限制 optimizer steps（例如 30 steps），保证"验证链路"而不是"完整训练一轮"
+- 关键开关：
+  - `MOE_BACKEND=deepspeed`：启用 DeepSpeed-MoE 作为 MoE 内核（保持 torchrun+DDP 启动）
+  - `USE_FLASH_ATTN=1`：启用 flash-attn（若环境缺依赖会自动回退）
+
 ### 3.1 显存优化
 
 - [ ] 激活重计算（gradient checkpointing）
@@ -183,6 +189,21 @@ torchrun --nproc_per_node=8 train/train_multimodal.py \
     --tokenizer_path ./tokenizers/qwen3-0.6b \
     --batch_size 8 \
     --epochs 10 \
+    --bf16 \
+    --distributed \
+    --output_dir ./outputs
+```
+
+### 使用 DeepSpeed-MoE 后端（P0-1）
+
+> 说明：这里仍然使用 torchrun+DDP 启动方式，仅替换 MoE 内核实现。
+
+```bash
+MOE_BACKEND=deepspeed torchrun --nproc_per_node=8 train/train_multimodal.py \
+    --data_dir ./data \
+    --tokenizer_path ./tokenizers/qwen3-0.6b \
+    --batch_size 8 \
+    --epochs 1 \
     --bf16 \
     --distributed \
     --output_dir ./outputs

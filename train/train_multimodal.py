@@ -375,6 +375,7 @@ def train(args):
     
     # 训练循环
     model.train()
+    stop_training = False
     for epoch in range(start_epoch, args.epochs):
         if args.distributed:
             # DDP 下我们在 DataLoader 里使用 DistributedSampler
@@ -490,6 +491,10 @@ def train(args):
                 global_step = int(getattr(model, "global_steps", global_step + 1))
                 grad_norm = 0.0
                 step_time = time.time() - data_t0
+
+                # DeepSpeed 分支也支持 max_steps（用于 smoke test / 调试）
+                if args.max_steps and global_step >= int(args.max_steps):
+                    stop_training = True
             else:
                 loss_to_backward = loss / float(grad_accum)
                 if scaler.is_enabled():
@@ -582,14 +587,26 @@ def train(args):
                                 config=config,
                             )
                             print(f"Checkpoint saved to {ckpt_path}")
+
+                    # max_steps：用于 smoke test / 调试
+                    if args.max_steps and global_step >= int(args.max_steps):
+                        stop_training = True
             
             total_loss += loss.item()
+
+            if stop_training:
+                break
             
             # 打印日志
             if _is_rank0() and step % args.log_interval == 0:
                 avg_loss = total_loss / (step + 1)
                 print(f"Epoch {epoch+1}/{args.epochs}, Step {step}/{len(train_loader)}, Loss: {avg_loss:.4f}")
         
+        if stop_training:
+            if _is_rank0():
+                print(f"[stop] reached max_steps={args.max_steps}, stop training.")
+            break
+
         # 计算 epoch 时间
         epoch_time = time.time() - start_time
         if _is_rank0():
@@ -691,6 +708,7 @@ def main():
     parser.add_argument('--save_interval', type=int, default=1, help='Save interval')
     parser.add_argument('--resume_from', type=str, default='', help='Path to checkpoint to resume from')
     parser.add_argument('--save_steps', type=int, default=0, help='Save checkpoint every N optimizer steps (0=disable)')
+    parser.add_argument('--max_steps', type=int, default=0, help='Stop training after N optimizer steps (0=disable)')
     
     args = parser.parse_args()
     

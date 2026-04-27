@@ -18,6 +18,12 @@
 bash scripts/smoke_1node_1gpu.sh
 ```
 
+跑一个 1-node 8-GPU 的 DDP smoke（默认只跑少量 steps，用于回归）：
+
+```bash
+bash scripts/smoke_1node_8gpu.sh
+```
+
 > 运行前请确保 `./data` 下存在 `image_cache/` 和对应的 csv/jsonl（仓库已带少量示例文件）。
 
 ---
@@ -62,6 +68,34 @@ bash scripts/smoke_1node_1gpu.sh
 ```bash
 pip install -r requirements.txt
 python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+```
+
+### 可选加速依赖（P0 相关）
+
+#### 1) DeepSpeed（用于 MoE 内核：MOE_BACKEND=deepspeed）
+
+```bash
+pip install deepspeed
+```
+
+启用方式（不改变启动方式，仍 torchrun+DDP）：
+
+```bash
+MOE_BACKEND=deepspeed bash scripts/smoke_1node_1gpu.sh
+```
+
+#### 2) flash-attn（用于 Attention 加速：USE_FLASH_ATTN=1）
+
+> 若未安装/不兼容，会自动回退到 torch 原生实现。
+
+```bash
+pip install flash-attn --no-build-isolation
+```
+
+启用方式：
+
+```bash
+USE_FLASH_ATTN=1 bash scripts/smoke_1node_1gpu.sh
 ```
 
 ---

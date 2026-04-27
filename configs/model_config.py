@@ -46,6 +46,13 @@ class ModelConfig:
     attention_causal: bool = True
 
     # -------------------------
+    # GatedDeltaNet（P0-3：训练性能）
+    # -------------------------
+    # 训练时序列递推如果按 token 循环会非常慢，这里用 chunk-wise 向量化替代。
+    # chunk 越大速度越好，但会占用更多显存（因为需要暂存 [B,H_kv,chunk,d,d] 的 state 序列）
+    deltanet_chunk_size: int = 256
+
+    # -------------------------
     # RoPE / 长上下文扩展（先做最小可用：linear scaling）
     # -------------------------
     # rope_scaling_type:

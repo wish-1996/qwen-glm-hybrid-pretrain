@@ -156,6 +156,7 @@ class GatedDeltaNet(nn.Module):
         self.num_kv_heads = config.num_kv_heads # GQA 核心
         self.head_dim = self.hidden_size // self.num_heads
         self.layer_idx = layer_idx
+        self.deltanet_chunk_size = int(getattr(config, "deltanet_chunk_size", 256))
         
         # 投影层 (K/V 维度小于 Q，体现 GQA)
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
@@ -227,37 +228,53 @@ class GatedDeltaNet(nn.Module):
             return self.out_proj(output), new_state
 
         else:
-            # 训练模式：用"顺序递推"实现（正确但慢），先保证数学正确
-            # state 形状：(B, num_kv_heads, head_dim, head_dim)
-            # 示例：(2, 4, 128, 128)
+            # 训练模式：chunk-wise 向量化（P0-3）
+            #
+            # 原实现是：
+            #   state_t = state_{t-1} + update_t
+            #   out_t   = q_t @ state_t
+            # 其中 update_t = g_t * outer(k_t, v_t)，outer(i,j)=k_i*v_j（再按 g_i 做行缩放）
+            #
+            # 这里按 chunk 计算，避免 O(N) Python 循环，同时控制显存峰值。
             state = torch.zeros(B, self.num_kv_heads, self.head_dim, self.head_dim, device=x.device, dtype=q.dtype)
-            outputs = []
             groups = self.num_heads // self.num_kv_heads  # 16/4=4
+            outputs = []
 
-            # 顺序遍历序列中的每个 token
-            for t in range(N):
-                # 取出第 t 个位置的 K/V/G
-                k_t = k[:, :, t, :]  # [B, num_kv_heads, head_dim]，示例：(2, 4, 128)
-                v_t = v[:, :, t, :]  # [B, num_kv_heads, head_dim]
-                g_t = g[:, :, t, :]  # [B, num_kv_heads, head_dim]
+            chunk = max(1, int(self.deltanet_chunk_size))
+            for start in range(0, N, chunk):
+                end = min(N, start + chunk)
+                T = end - start
 
-                # 外积计算 k^T @ v -> [B, num_kv_heads, head_dim, head_dim]
-                outer = k_t.unsqueeze(-1) * v_t.unsqueeze(-2)          # [B,H_kv,d,d]
-                # gated update: state = state + g_t * outer
-                state = state + g_t.unsqueeze(-1) * outer              # gated update
+                # [B, H_kv, T, d]
+                k_c = k[:, :, start:end, :]
+                v_c = v[:, :, start:end, :]
+                g_c = g[:, :, start:end, :]
+                q_c = q[:, :, start:end, :]  # [B, H_q, T, d]
 
-                # 扩展 state 以匹配 Q 头数
-                state_expanded = state.repeat_interleave(groups, dim=1) # [B,num_heads,d,d]
-                # 取第 t 个 Q 向量
-                q_t = q[:, :, t, :]                                     # [B,num_heads,d]
-                # Q @ State -> [B,num_heads,1,d] @ [B,num_heads,d,d] -> [B,num_heads,d]
-                out_t = torch.matmul(q_t.unsqueeze(-2), state_expanded).squeeze(-2)
-                outputs.append(out_t)
+                # update_t(i,j) = (g_i*k_i) * v_j
+                # updates: [B, H_kv, T, d, d]
+                updates = (g_c * k_c).unsqueeze(-1) * v_c.unsqueeze(-2)
 
-            # 堆叠所有时间步的输出
-            # outputs: N 个 [B, num_heads, head_dim] -> [B, num_heads, N, head_dim]
-            output = torch.stack(outputs, dim=2)
-            # 转换形状：[B, num_heads, N, head_dim] -> [B, N, num_heads, head_dim] -> [B, N, H]
+                # state_seq: [B, H_kv, T, d, d]，每个时间步的"更新后 state"
+                state_seq = updates.cumsum(dim=2) + state.unsqueeze(2)
+
+                # 不做 state.repeat_interleave，直接按 GQA 分组计算：
+                # q_rg: [B, H_kv, groups, T, d]
+                q_c = q_c.contiguous()
+                q_rg = q_c.view(B, self.num_kv_heads, groups, T, self.head_dim)
+
+                # out_rg: [B, H_kv, groups, T, d]
+                out_rg = torch.einsum("bhgtd,bhtde->bhgte", q_rg, state_seq)
+
+                # [B, H_q, T, d]
+                out_c = out_rg.reshape(B, self.num_heads, T, self.head_dim)
+                outputs.append(out_c)
+
+                # 更新 state 到 chunk 末尾
+                state = state_seq[:, :, -1, :, :].contiguous()
+
+            # [B, H_q, N, d] -> [B, N, H]
+            output = torch.cat(outputs, dim=2)
             output = output.transpose(1, 2).contiguous().view(B, N, self.hidden_size)
             return self.out_proj(output), None
 

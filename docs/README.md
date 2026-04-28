@@ -11,6 +11,7 @@
 7. [07 Checkpoint / 日志 / 评测](./07_checkpoint_logging_eval.md)
 8. [08 注意力实现与 3D RoPE（M-RoPE）](./08_attention_and_mrope.md)
 9. [09 生产级训练落地计划（Roadmap + Checklist）](./09_production_plan.md)
+10. [10 对齐 DeepSeek-V4：差距清单与实现路线图](./10_gap_to_deepseek_v4.md)
 
 ## Tools（可直接运行的工程脚本）
 
@@ -18,6 +19,16 @@
 - Speculative Decoding demo：`python tools/run_spec_decode_demo.py --help`
 - 显存占用分析（按你们真实实现口径估算）：`python tools/mem_profile.py --help`
 - 训练计划估算（数据量/avg tokens/steps/时间）：`python tools/estimate_training_plan.py --help`
+- DeltaNet chunk 基准（验证 P0-3 chunk-wise 是否生效）：`python tools/bench_deltanet_chunk.py --help`
+
+## Smoke（快速回归）
+
+- 单机单卡：`bash scripts/smoke_1node_1gpu.sh`
+- 单机 8 卡（DDP）：`bash scripts/smoke_1node_8gpu.sh`
+
+关键开关（可选）：
+- `MOE_BACKEND=deepspeed`：启用 DeepSpeed-MoE（替换 Python MoE 循环）
+- `USE_FLASH_ATTN=1`：启用 flash-attn（若依赖不可用则自动回退）
 
 ## 配置预设（本地/生产）
 

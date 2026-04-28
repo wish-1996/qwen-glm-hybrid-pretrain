@@ -62,7 +62,7 @@
 - [x] rank0 专用日志文件
 - [x] 训练指标记录（loss、grad\_norm、tokens\_per\_sec）
 - [x] 时间统计（data\_time、step\_time）
-- [ ] 训练计划估算工具（数据量/avg tokens/steps/时间；与日志 tokens/s 对齐）
+- [x] 训练计划估算工具（数据量/avg tokens/steps/时间；与日志 tokens/s 对齐）
 
 ### 2.4 分布式训练
 

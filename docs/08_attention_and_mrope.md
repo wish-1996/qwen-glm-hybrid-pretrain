@@ -8,9 +8,13 @@
 
 ### 标准注意力（StandardAttention）
 
+目前 StandardAttention 支持两条路径：
+- **torch**：纯 PyTorch matmul + softmax（最稳，任何环境都能跑）
+- **flash**：可选 flash-attn（满足条件时启用，否则自动 fallback 到 torch）
+
 ```python
 class StandardAttention(nn.Module):
-    def forward(self, x, positions, mask=None):
+    def forward(self, x, positions, attention_mask=None):
         # x: [B, N, H]
         # 投影 Q/K/V
         q = self.q_proj(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
@@ -20,15 +24,20 @@ class StandardAttention(nn.Module):
         # 应用 M-RoPE
         q, k = self.mrope(q, k, positions)
 
-        # GQA 扩展
+        # flash-attn 路径（GQA/MQA）：避免 repeat_interleave 扩 KV（节省显存/带宽）
+        if self.use_flash_attn and attention_mask is None:
+            # 这里省略具体 flash_attn_func 调用细节
+            return self.out_proj(out_from_flash_attn)
+
+        # torch 路径：如需兼容 GQA，会在这里 repeat_interleave（后续可继续优化）
         groups = self.num_heads // self.num_kv_heads
         k = k.repeat_interleave(groups, dim=1)
         v = v.repeat_interleave(groups, dim=1)
 
         # 计算注意力
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        if mask is not None:
-            scores = scores.masked_fill(mask == 0, float('-inf'))
+        if attention_mask is not None:
+            scores = scores.masked_fill(attention_mask == 0, float('-inf'))
         attn = F.softmax(scores, dim=-1)
 
         # 输出

@@ -104,6 +104,8 @@ USE_FLASH_ATTN=1 bash scripts/smoke_1node_1gpu.sh
 
 - 参数量估算（按当前 per-layer MoE 实现口径）：`python tools/param_count.py --help`
 - 显存占用分析（单卡/多卡 DDP）：`python tools/mem_profile.py --help`
+- 训练计划估算（数据量/avg tokens/steps/时间）：`python tools/estimate_training_plan.py --help`
+- DeltaNet chunk 基准（验证 P0-3 chunk-wise 是否生效）：`python tools/bench_deltanet_chunk.py --help`
 
 ## 配置预设（本地/生产）
 

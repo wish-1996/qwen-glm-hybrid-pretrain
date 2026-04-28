@@ -18,7 +18,13 @@
 bash scripts/smoke_1node_1gpu.sh
 ```
 
-跑一个 1-node 8-GPU 的 DDP smoke（默认只跑少量 steps，用于回归）：
+如果你是本地 **RTX 4060 8G**（显存紧张），建议用"本地小模型 preset"跑 smoke（更稳，不易 OOM）：
+
+```bash
+bash scripts/smoke_local_4060_8g.sh
+```
+
+如果你在单机有 8 张 GPU，可以跑一个 1-node 8-GPU 的 DDP smoke（用于回归验证）：
 
 ```bash
 bash scripts/smoke_1node_8gpu.sh
@@ -84,7 +90,7 @@ pip install deepspeed
 MOE_BACKEND=deepspeed bash scripts/smoke_1node_1gpu.sh
 ```
 
-#### 2) flash-attn（用于 Attention 加速：USE_FLASH_ATTN=1）
+#### 2) flash-attn（用于 Attention 加速：USE_FLASH_ATTN=1 / attention_backend=flash）
 
 > 若未安装/不兼容，会自动回退到 torch 原生实现。
 
@@ -123,4 +129,4 @@ USE_FLASH_ATTN=1 bash scripts/smoke_1node_1gpu.sh
 接下来优先级最高的几项：
 1) MoE 路由/负载监控（expert load、topk 分布、aux_loss 曲线）
 2) 长上下文阶段训练：4k→8k（linear）→16k/32k（dynamic_ntk + 稀疏 attention）
-3) StandardAttention 接入 flash-attn；线性注意力训练路径去掉 Python for-loop
+3) StandardAttention 接入 flash-attn（varlen/packing mask 适配）；线性注意力训练路径继续优化（chunk → scan kernel）

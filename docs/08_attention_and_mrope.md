@@ -74,8 +74,24 @@ class GatedDeltaNet(nn.Module):
             output = torch.matmul(q.unsqueeze(-2), state_expanded).squeeze(-2)
             return self.out_proj(output), new_state
         else:
-            # 训练模式：顺序递推
+            # 训练模式：chunk-wise 向量化（P0-3）
+            # - 去掉 token 级 for-loop（长序列下会非常慢）
+            # - chunk size 通过 config.deltanet_chunk_size 控制（默认 256）
             # ...
+```
+
+#### 训练性能参数（P0-3）
+
+在 `configs/model_config.py` 中配置：
+
+```python
+deltanet_chunk_size: int = 256
+```
+
+你可以用基准脚本快速检查 chunk-wise 是否生效：
+
+```bash
+python tools/bench_deltanet_chunk.py --seq 4096 --chunk 256 --dtype bf16 --batch 2
 ```
 
 ## 3D RoPE（M-RoPE）

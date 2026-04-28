@@ -112,7 +112,8 @@
 
 ### 3.2 计算优化
 
-- [ ] Flash Attention 集成
+- [x] Flash Attention 集成（基础版：可选开关 + 自动 fallback；varlen/packing mask 适配后续做）
+- [x] DeltaNet 训练分支 chunk-wise（去掉 token 级 for-loop）
 - [ ] 序列 packing（多个样本打包成一个序列）
 - [ ] 动态批处理（根据序列长度调整批次大小）
 - [ ] 数据预取与异步加载

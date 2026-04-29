@@ -1,0 +1,26 @@
+# 项目运行依赖（不包含 PyTorch）
+#
+# 说明：
+# - PyTorch 请按你的 CUDA/驱动版本单独安装（要求 PyTorch >= 2.0）
+# - flash-attn 属于可选加速依赖，通常需要按环境单独安装：
+#     pip install flash-attn --no-build-isolation
+
+numpy>=1.24
+tqdm>=4.66
+packaging>=23.0
+
+pillow>=10.0
+
+transformers>=4.41
+tokenizers>=0.19
+safetensors>=0.4
+
+pyarrow>=14.0
+pandas>=2.0
+
+# 分布式/ZeRO（训练用；如果你只跑单卡/不启用 --deepspeed，可不装）
+deepspeed>=0.14.0
+
+# 其他常用工具
+psutil>=5.9
+pyyaml>=6.0

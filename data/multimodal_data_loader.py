@@ -60,6 +60,11 @@ class MultimodalDataConfig:
     max_length: int = 512
     image_size: int = 224
 
+    # padding 策略：
+    # - "max_length"：始终 pad 到 max_length（简单，但浪费算力/显存）
+    # - "dynamic"   ：样本不 pad；在 collate 时按 batch 内 max_len 动态 pad（支持 varlen）
+    padding_mode: str = "max_length"
+
     # 训练可控性
     seed: int = 42
 
@@ -247,10 +252,11 @@ class MultimodalDataset(Dataset):
                 idx = random.randrange(len(self.mm_pairs))
                 continue
 
+            padding = "max_length" if self.cfg.padding_mode == "max_length" else False
             enc = self.tokenizer(
                 text,
                 max_length=self.cfg.max_length,
-                padding="max_length",
+                padding=padding,
                 truncation=True,
                 return_tensors="pt",
             )
@@ -303,6 +309,32 @@ def build_dataloader(
 
     seed_worker_fn = get_seed_worker_fn(cfg.seed, rank)
 
+    def _collate_fn(samples: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        input_ids_list = [s["input_ids"] for s in samples]
+        attn_list = [s["attention_mask"] for s in samples]
+        pixels = torch.stack([s["pixel_values"] for s in samples], dim=0)
+
+        if cfg.padding_mode == "max_length":
+            input_ids = torch.stack(input_ids_list, dim=0)
+            attention_mask = torch.stack(attn_list, dim=0)
+            return {"input_ids": input_ids, "attention_mask": attention_mask, "pixel_values": pixels}
+
+        # dynamic pad
+        lengths = [int(x.numel()) for x in input_ids_list]
+        max_len = min(int(cfg.max_length), max(lengths))
+        pad_id = tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
+
+        B = len(samples)
+        input_ids = torch.full((B, max_len), int(pad_id), dtype=input_ids_list[0].dtype)
+        attention_mask = torch.zeros((B, max_len), dtype=attn_list[0].dtype)
+        for i, (ids, am) in enumerate(zip(input_ids_list, attn_list)):
+            L = min(max_len, int(ids.numel()))
+            input_ids[i, :L] = ids[:L]
+            attention_mask[i, :L] = am[:L]
+        return {"input_ids": input_ids, "attention_mask": attention_mask, "pixel_values": pixels}
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -311,6 +343,7 @@ def build_dataloader(
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=drop_last,
+        collate_fn=_collate_fn,
         worker_init_fn=seed_worker_fn if num_workers and num_workers > 0 else None,
     )
 
@@ -322,6 +355,7 @@ def get_data_loader(
     max_length,
     image_size,
     *,
+    padding_mode: str = "max_length",
     num_workers: int = 4,
     pin_memory: bool = True,
     distributed: bool = False,
@@ -334,6 +368,7 @@ def get_data_loader(
         max_length=max_length,
         image_size=image_size,
         seed=seed,
+        padding_mode=padding_mode,
     )
     return build_dataloader(
         tokenizer=tokenizer,

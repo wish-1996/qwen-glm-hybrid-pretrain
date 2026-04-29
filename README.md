@@ -30,6 +30,27 @@ bash scripts/smoke_local_4060_8g.sh
 bash scripts/smoke_1node_8gpu.sh
 ```
 
+## 单机 2x4090D（24G）推荐启动方式
+
+你只有两张卡（每卡 24G），**总显存不是 48G 共享**，而是 **每张卡各 24G**。  
+想跑更大配置（如 `prod7b`）建议直接用 **DeepSpeed ZeRO-3**（否则 optimizer states/activation 很容易 OOM）。
+
+推荐脚本：
+
+```bash
+bash scripts/train_1node_2gpu_4090d_24g.sh
+```
+
+常用调参（从稳到激进）：
+
+```bash
+# 先从 2k 上下文稳定起步
+MAX_LEN=2048 BATCH=1 GRAD_ACCUM=8 STEPS=200 bash scripts/train_1node_2gpu_4090d_24g.sh
+
+# 若显存足够，再尝试 4k（必要时把 BATCH 降到 1 并增大 GRAD_ACCUM）
+MAX_LEN=4096 BATCH=1 GRAD_ACCUM=16 STEPS=200 bash scripts/train_1node_2gpu_4090d_24g.sh
+```
+
 > 运行前请确保 `./data` 下存在 `image_cache/` 和对应的 csv/jsonl（仓库已带少量示例文件）。
 
 ---

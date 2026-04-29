@@ -195,19 +195,37 @@ def train(args):
         args.num_workers = 0
         args.pin_memory = False
     
-    train_loader = get_data_loader(
-        data_dir=args.data_dir,
-        tokenizer=tokenizer,
-        batch_size=args.batch_size,
-        max_length=args.max_length,
-        image_size=args.image_size,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_memory,
-        distributed=args.distributed,
-        rank=rank,
-        world_size=world_size,
-        seed=args.seed,
-    )
+    if (args.dataset_mode or "multimodal").lower() == "text":
+        from data.text_data_loader import build_text_dataloader
+
+        train_loader = build_text_dataloader(
+            data_dir=args.data_dir,
+            tokenizer=tokenizer,
+            batch_size=args.batch_size,
+            max_length=args.max_length,
+            packing=bool(args.packing),
+            num_workers=args.num_workers,
+            pin_memory=args.pin_memory,
+            distributed=args.distributed,
+            rank=rank,
+            world_size=world_size,
+            seed=args.seed,
+        )
+    else:
+        train_loader = get_data_loader(
+            data_dir=args.data_dir,
+            tokenizer=tokenizer,
+            batch_size=args.batch_size,
+            max_length=args.max_length,
+            image_size=args.image_size,
+            padding_mode=args.padding_mode,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_memory,
+            distributed=args.distributed,
+            rank=rank,
+            world_size=world_size,
+            seed=args.seed,
+        )
     if _is_rank0():
         print(f"Data loader created. Number of batches: {len(train_loader)}")
     
@@ -257,7 +275,8 @@ def train(args):
         if _is_rank0():
             print(f"[config] use_flash_attn <- {config.use_flash_attn} (from env USE_FLASH_ATTN)")
 
-    model = HybridMMMoEModel(config, use_multimodal=True)
+    use_multimodal = (args.dataset_mode or "multimodal").lower() != "text"
+    model = HybridMMMoEModel(config, use_multimodal=use_multimodal)
     model.to(device)
     if _is_rank0():
         print("Model initialized and moved to device.")
@@ -395,29 +414,38 @@ def train(args):
 
             data_t0 = time.time()
             # 移至设备
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            pixel_values = batch['pixel_values'].to(device)
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            pixel_values = batch.get("pixel_values", None)
+            if pixel_values is not None:
+                pixel_values = pixel_values.to(device)
             
             # 构造文本 positions（3D：[t,0,0]）
             B, T = input_ids.shape
             t = torch.arange(T, device=device).unsqueeze(0).expand(B, -1)
             text_positions = torch.stack([t, torch.zeros_like(t), torch.zeros_like(t)], dim=-1)  # [B, T, 3]
             
-            # Step 1：多模态序列对齐（关键）
-            aligned = build_aligned_masks_and_labels(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                image_size=config.image_size,
-                patch_size=config.patch_size,
-                pad_ignore_index=-100,
-                image_pad_token_id=getattr(config, "image_pad_token_id", None),
-                build_positions=True,
-            )
-            input_ids_total = aligned.input_ids_total
-            attention_mask_total = aligned.attention_mask_total
-            labels_total = aligned.labels_total
-            positions_total = aligned.positions_total
+            if use_multimodal:
+                # Step 1：多模态序列对齐（关键）
+                aligned = build_aligned_masks_and_labels(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    image_size=config.image_size,
+                    patch_size=config.patch_size,
+                    pad_ignore_index=-100,
+                    image_pad_token_id=(getattr(config, "image_pad_token_id", None) if use_multimodal else None),
+                    build_positions=True,
+                )
+                input_ids_total = aligned.input_ids_total
+                attention_mask_total = aligned.attention_mask_total
+                labels_total = aligned.labels_total
+                positions_total = aligned.positions_total
+            else:
+                # text-only：不拼 image tokens，labels 仅对 padding 置 -100
+                input_ids_total = input_ids
+                attention_mask_total = attention_mask
+                labels_total = input_ids.clone().masked_fill(attention_mask == 0, -100)
+                positions_total = text_positions
 
             data_time = time.time() - data_t0
             
@@ -439,7 +467,7 @@ def train(args):
                     use_cache=False,
                     output_hidden_states=need_hidden,
                     # 让模型知道：input_ids_total 的前 T_img 个位置是 <|image_pad|> 占位符
-                    image_pad_token_id=getattr(config, "image_pad_token_id", None),
+                    image_pad_token_id=(getattr(config, "image_pad_token_id", None) if use_multimodal else None),
                 )
 
             if need_hidden:
@@ -660,6 +688,9 @@ def main():
     
     # 模型参数
     parser.add_argument('--max_length', type=int, default=512, help='Max sequence length')
+    parser.add_argument('--dataset_mode', type=str, default="multimodal", choices=["multimodal", "text"], help='Dataset mode: multimodal or text-only')
+    parser.add_argument('--padding_mode', type=str, default="dynamic", choices=["dynamic", "max_length"], help='Padding mode for multimodal dataloader')
+    parser.add_argument('--packing', action='store_true', help='Enable sample packing (text-only mode)')
     parser.add_argument('--image_size', type=int, default=224, help='Image size')
     parser.add_argument(
         '--config_preset',
@@ -668,7 +699,7 @@ def main():
         choices=['default', 'local', 'prod7b'],
         help='Model config preset: default / local (small for debugging) / prod7b (7B target)'
     )
-    parser.add_argument('--attention_backend', type=str, default='', choices=['', 'torch', 'flash'],
+    parser.add_argument('--attention_backend', type=str, default='', choices=['', 'torch', 'flash', 'flash_varlen'],
                         help='Attention backend override: torch / flash (fallback to torch if unavailable)')
     
     # 训练参数

@@ -114,6 +114,8 @@
 
 - [x] Flash Attention 集成（基础版：可选开关 + 自动 fallback；varlen/packing mask 适配后续做）
 - [x] DeltaNet 训练分支 chunk-wise（去掉 token 级 for-loop）
+- [x] varlen 动态 padding（数据侧输出 attention_mask 的 0/1，可用于 flash-attn varlen unpad）
+- [x] text-only sample packing（EOS 拼接，减少 padding 浪费）
 - [ ] 序列 packing（多个样本打包成一个序列）
 - [ ] 动态批处理（根据序列长度调整批次大小）
 - [ ] 数据预取与异步加载

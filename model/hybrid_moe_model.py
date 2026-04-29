@@ -349,6 +349,68 @@ class StandardAttention(nn.Module):
                 out = out_bt.reshape(B, N, -1)
                 return self.out_proj(out)
 
+        # -------------------------
+        # P1：Flash Attention varlen（基于 attention_mask 做 unpad/pad）
+        #
+        # 适用场景：
+        # - 数据侧使用 dynamic padding（batch 内按 max_len pad）
+        # - attention_mask 里 0/1 能表达真实长度
+        #
+        # 启用条件：
+        # - attention_backend == "flash_varlen"（或 "flash-varlen"）
+        # - attention_mask is not None
+        # - flash-attn 可用
+        # -------------------------
+        if (
+            attention_mask is not None
+            and str(self.attention_backend).lower().replace("-", "_") == "flash_varlen"
+            and self.use_flash_attn
+        ):
+            try:
+                from flash_attn import flash_attn_varlen_func  # type: ignore
+            except Exception:
+                flash_attn_varlen_func = None
+
+            if flash_attn_varlen_func is not None:
+                # attention_mask: [B, N] (0/1)
+                am = (attention_mask > 0).to(torch.int32)
+                seqlens = am.sum(dim=1, dtype=torch.int32)  # [B]
+                max_seqlen = int(seqlens.max().item()) if seqlens.numel() else N
+
+                # indices of valid tokens in flattened [B*N]
+                flat = am.reshape(-1)
+                idx = torch.nonzero(flat, as_tuple=False).squeeze(-1)  # [total_tokens]
+
+                # reshape to [B*N, H, d] then index_select
+                q_bn = q.transpose(1, 2).contiguous().view(B * N, self.num_heads, self.head_dim)
+                k_bn = k.transpose(1, 2).contiguous().view(B * N, self.num_kv_heads, self.head_dim)
+                v_bn = v.transpose(1, 2).contiguous().view(B * N, self.num_kv_heads, self.head_dim)
+
+                q_unpad = q_bn.index_select(0, idx)
+                k_unpad = k_bn.index_select(0, idx)
+                v_unpad = v_bn.index_select(0, idx)
+
+                # cu_seqlens: [B+1]
+                cu_seqlens = torch.zeros((B + 1,), device=x.device, dtype=torch.int32)
+                cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
+
+                out_unpad = flash_attn_varlen_func(
+                    q_unpad,
+                    k_unpad,
+                    v_unpad,
+                    cu_seqlens,
+                    cu_seqlens,
+                    max_seqlen,
+                    max_seqlen,
+                    dropout_p=self.flash_dropout_p,
+                    causal=bool(self.attention_causal),
+                )  # [total_tokens, Hq, d]
+
+                out_bn = torch.zeros((B * N, self.num_heads, self.head_dim), device=x.device, dtype=out_unpad.dtype)
+                out_bn.index_copy_(0, idx, out_unpad)
+                out = out_bn.view(B, N, self.num_heads * self.head_dim)
+                return self.out_proj(out)
+
         # GQA 扩展 K/V 以匹配 Q
         # groups = num_heads / num_kv_heads = 16/4 = 4
         # 扩展后：k, v 从 [B, 4, N, 128] -> [B, 16, N, 128]

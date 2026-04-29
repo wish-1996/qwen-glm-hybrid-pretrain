@@ -51,6 +51,60 @@ MAX_LEN=2048 BATCH=1 GRAD_ACCUM=8 STEPS=200 bash scripts/train_1node_2gpu_4090d_
 MAX_LEN=4096 BATCH=1 GRAD_ACCUM=16 STEPS=200 bash scripts/train_1node_2gpu_4090d_24g.sh
 ```
 
+## P1：从 1024 开始训练（packing + varlen）
+
+你说"从 1024 开始训练"，推荐先把 **padding 浪费**砍掉，再逐步上更长上下文。
+
+### 方案 A（推荐先用）：text-only + packing（吞吐最稳）
+
+适合先热身/对齐训练链路，不引入图像 prefix，packing 能显著减少 padding：
+
+```bash
+# 2x4090D：text-only + packing + flash-attn varlen
+MOE_BACKEND=deepspeed USE_FLASH_ATTN=1 \
+torchrun --nproc_per_node=2 train/train_multimodal.py \
+  --dataset_mode text \
+  --packing \
+  --config_preset prod7b \
+  --max_length 1024 \
+  --attention_backend flash_varlen \
+  --batch_size 1 \
+  --gradient_accumulation_steps 8 \
+  --bf16 \
+  --distributed \
+  --deepspeed --zero_stage 3 \
+  --max_steps 200 \
+  --output_dir ./outputs_text_pack_1024
+```
+
+如果你用的是 `data/ultrafineweb_zh/*.parquet`（字段列名为 `content`），可直接跑 warmup 脚本：
+
+```bash
+bash scripts/warmup_1node_2gpu_text_parquet_1024.sh
+```
+
+### 方案 B：multimodal + dynamic padding + flash-varlen
+
+多模态训练仍然保留 image prefix（T_img=196），text 部分采用 dynamic padding，使 attention_mask 具有 0/1，
+从而启用 flash-attn varlen。
+
+```bash
+MOE_BACKEND=deepspeed USE_FLASH_ATTN=1 \
+torchrun --nproc_per_node=2 train/train_multimodal.py \
+  --dataset_mode multimodal \
+  --padding_mode dynamic \
+  --config_preset prod7b \
+  --max_length 1024 \
+  --attention_backend flash_varlen \
+  --batch_size 1 \
+  --gradient_accumulation_steps 8 \
+  --bf16 \
+  --distributed \
+  --deepspeed --zero_stage 3 \
+  --max_steps 200 \
+  --output_dir ./outputs_mm_varlen_1024
+```
+
 > 运行前请确保 `./data` 下存在 `image_cache/` 和对应的 csv/jsonl（仓库已带少量示例文件）。
 
 ---

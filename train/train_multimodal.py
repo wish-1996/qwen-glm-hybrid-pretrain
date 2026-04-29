@@ -210,6 +210,10 @@ def train(args):
             rank=rank,
             world_size=world_size,
             seed=args.seed,
+            text_format=args.text_format,
+            jsonl_path=args.jsonl_path,
+            parquet_glob=args.parquet_glob,
+            parquet_text_column=args.parquet_text_column,
         )
     else:
         train_loader = get_data_loader(
@@ -691,6 +695,10 @@ def main():
     parser.add_argument('--dataset_mode', type=str, default="multimodal", choices=["multimodal", "text"], help='Dataset mode: multimodal or text-only')
     parser.add_argument('--padding_mode', type=str, default="dynamic", choices=["dynamic", "max_length"], help='Padding mode for multimodal dataloader')
     parser.add_argument('--packing', action='store_true', help='Enable sample packing (text-only mode)')
+    parser.add_argument('--text_format', type=str, default="jsonl", choices=["jsonl", "parquet"], help='Text dataset format (text-only mode)')
+    parser.add_argument('--jsonl_path', type=str, default="ultrafineweb_zh/sample_5.jsonl", help='JSONL path relative to data_dir (text-only mode)')
+    parser.add_argument('--parquet_glob', type=str, default="ultrafineweb_zh/*.parquet", help='Parquet glob relative to data_dir (text-only mode)')
+    parser.add_argument('--parquet_text_column', type=str, default="", help='Parquet text column name (default: auto detect text/content/passage)')
     parser.add_argument('--image_size', type=int, default=224, help='Image size')
     parser.add_argument(
         '--config_preset',

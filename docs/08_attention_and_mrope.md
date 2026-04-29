@@ -11,6 +11,7 @@
 目前 StandardAttention 支持两条路径：
 - **torch**：纯 PyTorch matmul + softmax（最稳，任何环境都能跑）
 - **flash**：可选 flash-attn（满足条件时启用，否则自动 fallback 到 torch）
+- **flash_varlen**：基于 attention_mask 做 unpad/pad，走 flash-attn varlen（推荐配合 dynamic padding / packing）
 
 ```python
 class StandardAttention(nn.Module):
@@ -93,6 +94,14 @@ deltanet_chunk_size: int = 256
 ```bash
 python tools/bench_deltanet_chunk.py --seq 4096 --chunk 256 --dtype bf16 --batch 2
 ```
+
+#### P1：varlen / packing（从 1024 起步更划算）
+
+1) 多模态：dynamic padding（batch 内按最大长度 pad）
+2) text-only：sample packing（EOS 拼接成近似满的 block）
+
+当 `attention_backend=flash_varlen` 且 `USE_FLASH_ATTN=1` 时，StandardAttention 会根据 attention_mask 做 unpad/pad，
+在长序列上可明显减少 padding 带来的无效计算。
 
 ## 3D RoPE（M-RoPE）
 

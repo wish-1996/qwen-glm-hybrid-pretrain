@@ -1,36 +1,13 @@
-# 文档索引（docs/）
+# 文档索引
 
-目标：每一项"生产级要素"都对应一份可阅读、可复现、可扩展的说明文档。
-
-1. [01 训练入口与配置](./01_training_entry.md)
-2. [02 模型侧：原生多模态 + MoE](./02_model_architecture.md)（含端到端 shape walkthrough：从 batch 到 logits）
-3. [03 并行与通信：DP/TP/PP/EP 与 all-to-all](./03_parallelism_and_communication.md)
-4. [04 训练稳定性与内存：BF16、重计算、梯度裁剪、ZeRO](./04_stability_and_memory.md)
-5. [05 多模态序列对齐（Step 1）](./05_multimodal_sequence_alignment.md)
-6. [06 数据管线：格式、混合采样、packing 与 mask](./06_data_pipeline.md)
-7. [07 Checkpoint / 日志 / 评测](./07_checkpoint_logging_eval.md)
+1. [01 训练入口与基本参数解析](./01_training_entry.md)
+2. [02 数据加载与预处理](./02_data_loading.md)
+3. [03 混合 MoE 模型架构](./03_hybrid_moe_architecture.md)
+4. [04 Gated DeltaNet 实现](./04_gated_deltanet.md)
+5. [05 标准注意力与 RoPE](./05_standard_attention_and_rope.md)
+6. [06 训练循环与优化器](./06_training_loop.md)
+7. [07 分布式训练与 DeepSpeed](./07_distributed_training.md)
 8. [08 注意力实现与 3D RoPE（M-RoPE）](./08_attention_and_mrope.md)
 9. [09 生产级训练落地计划（Roadmap + Checklist）](./09_production_plan.md)
 10. [10 对齐 DeepSeek-V4：差距清单与实现路线图](./10_gap_to_deepseek_v4.md)
-
-## Tools（可直接运行的工程脚本）
-
-- 参数量估算（用于对齐 7B total / 0.6B active）：`python tools/param_count.py --help`
-- Speculative Decoding demo：`python tools/run_spec_decode_demo.py --help`
-- 显存占用分析（按你们真实实现口径估算）：`python tools/mem_profile.py --help`
-- 训练计划估算（数据量/avg tokens/steps/时间）：`python tools/estimate_training_plan.py --help`
-- DeltaNet chunk 基准（验证 P0-3 chunk-wise 是否生效）：`python tools/bench_deltanet_chunk.py --help`
-
-## Smoke（快速回归）
-
-- 单机单卡：`bash scripts/smoke_1node_1gpu.sh`
-- 单机 8 卡（DDP）：`bash scripts/smoke_1node_8gpu.sh`
-
-关键开关（可选）：
-- `MOE_BACKEND=deepspeed`：启用 DeepSpeed-MoE（替换 Python MoE 循环）
-- `USE_FLASH_ATTN=1`：启用 flash-attn（若依赖不可用则自动回退）
-
-## 配置预设（本地/生产）
-
-- 本地调试小模型：`configs/model_config_local.py`（目标：4060-8G 也能跑通训练链路）
-- 生产级 7B 目标：`configs/model_config_prod_7b.py`（按当前 per-layer MoE 实现口径对齐 7B/0.6B）
+11. [11 热身训练原理（从 1024 开始）：packing / varlen / flash-varlen / ZeRO / MoE](./11_warmup_and_training_principles.md)

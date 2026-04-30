@@ -29,7 +29,7 @@ python -c "import torch; print(torch.__version__); print('cuda_available=', torc
 ### 2) 安装项目依赖（不包含 PyTorch）
 
 仓库根目录提供：
-- `requirements.txt`（运行依赖）
+- `requirements.txt`（运行依赖，不包含 PyTorch；要求 PyTorch >= 2.0）
 - `env/environment.yml`（conda 入口，内部仍通过 requirements.txt 装依赖）
 
 推荐 pip 安装方式：
@@ -45,7 +45,7 @@ pip install -r requirements.txt
 若需要自行安装，可参考官方 CUDA 12.4 wheel（示例）：
 
 ```bash
-pip install --index-url https://download.pytorch.org/whl/cu124 torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1
+pip install --index-url https://download.pytorch.org/whl/cu124 torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1  # PyTorch>=2.0
 ```
 
 > Windows 下部分可选依赖（如 flash-attn）可能不易安装；建议先跑通训练链路，再在 Linux 服务器上启用 flash-attn/大规模并行。

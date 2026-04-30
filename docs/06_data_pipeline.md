@@ -13,10 +13,22 @@
 
 ### 2. ultrafineweb_zh 文本数据
 
-- **格式**：JSONL 文件，每行一个 JSON 对象，包含 `text` 字段
+- **格式**：
+  - JSONL：每行一个 JSON 对象，包含 `text` 字段（小规模/调试）
+  - Parquet：大规模语料（生产常用，你们当前热身阶段推荐用 parquet）
 - **处理**：
   - 容错处理：JSON 解析错误
   - 过滤空文本
+
+#### Parquet（你们当前使用）
+
+你们现在的 parquet schema 示例（你本地检查结果）：
+
+- `content: string`  ✅（正文列）
+- `score: string`
+- `source: string`
+
+因此 text-only 的 parquet 训练应指定 `parquet_text_column=content`。
 
 ## 数据加载
 
@@ -164,6 +176,13 @@ def _sample_text(self) -> Optional[str]:
 - **长度排序**：按序列长度排序，将相似长度的序列打包在一起
 - **填充处理**：计算批次中最长序列长度，对其他序列进行填充
 - **边界掩码**：创建跨样本边界的掩码，确保模型只关注当前样本
+
+#### 你们当前实现（text-only 热身）
+
+你们当前实现的是"EOS 拼接"的 sample packing（允许跨样本注意力）：
+- 位置：`data/text_data_loader.py::_pack_samples()`
+- 做法：`... + [EOS] + next_sample_ids ...`，满 `max_length` 就产出一个 block
+- 优点：实现简单、吞吐收益大、适合热身阶段快速闭环
 
 ### 3. 示例
 

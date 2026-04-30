@@ -147,16 +147,26 @@ torchrun --nproc_per_node=2 train/train_multimodal.py \
 推荐环境：**PyTorch 2.5.1 + Python 3.11 + CUDA 12.4**（与你截图一致）。
 
 ```bash
+# 1) 安装项目依赖（不包含 PyTorch）
 pip install -r requirements.txt
+
+# 2) 自检
 python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 ```
+
+> 如果你的环境里还没装 PyTorch（或版本太旧），请先安装 **PyTorch >= 2.0**（示例：CUDA 12.4 wheel）：
+>
+> ```bash
+> pip install --index-url https://download.pytorch.org/whl/cu124 torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1
+> ```
 
 ### 可选加速依赖（P0 相关）
 
 #### 1) DeepSpeed（用于 MoE 内核：MOE_BACKEND=deepspeed）
 
 ```bash
-pip install deepspeed
+# 已包含在 requirements.txt；若你未安装或需要升级，可单独执行
+pip install -U deepspeed
 ```
 
 启用方式（不改变启动方式，仍 torchrun+DDP）：
